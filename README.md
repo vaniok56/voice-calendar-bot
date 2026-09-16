@@ -14,6 +14,35 @@ Allowed users can send voice messages directly. The bot queues downloads, preser
 - `/add_admin <user_id>` - promote user; owner only.
 - `/rm_admin <user_id>` - demote admin; owner only.
 
+## Roadmap
+
+### Done
+
+- [x] Set up the repository, Docker deployment, private access, and logging.
+- [x] Receive, queue, and store Telegram voice messages.
+
+### Next
+
+- [ ] Build a fixed Romanian, Russian, and English ASR corpus and benchmark local models.
+- [ ] Select an ASR model and return transcripts for Telegram voice messages.
+- [ ] Support mixed-language recordings when the selected ASR model handles them reliably.
+- [ ] Benchmark local models for structured event extraction.
+- [ ] Extract operation, event type, title, date, time, duration, end time, location, reminders, and recurrence into a validated schema.
+- [ ] Resolve dates, times, durations, defaults, reminders, and timezone rules with deterministic code.
+- [ ] Detect missing, ambiguous, or unsupported fields without guessing.
+- [ ] Ask one focused question and keep the rest of the draft while the user answers.
+- [ ] Show an event summary with `Confirm`, `Retry`, and `Cancel` buttons.
+- [ ] Prevent repeated button presses from creating duplicate events.
+- [ ] Connect Google Calendar and support a setting that disables writes during testing.
+- [ ] Create the confirmed event and return its details.
+- [ ] Search Google Maps with Moldova bias when an event includes a location.
+- [ ] Show formatted addresses and preview links, then ask the user to choose when several places match.
+- [ ] Create events automatically only when measured confidence is high enough.
+- [ ] Add a `Done` message with event details and an `Edit` button.
+- [ ] Edit event fields one at a time.
+- [ ] List previous events and select one to edit.
+- [ ] Support general natural-language edits to existing events.
+
 ## Start
 
 1. Create configuration, then fill in `BOT_TOKEN` and `OWNER_ID`:

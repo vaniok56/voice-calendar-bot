@@ -1,5 +1,5 @@
 from aiogram import Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
 from ..storage import Storage
@@ -7,7 +7,14 @@ from ..storage import Storage
 
 router = Router(name="start")
 
-START_TEXT = "Bot is running."
+START_TEXT = (
+    "Send a voice message to store it automatically.\n\n"
+    "Format: OGG/Opus\n"
+    "Maximum size: 2 MiB\n"
+    "Retention: up to 7 days\n\n"
+    "/start - show this message\n"
+    "/help - show this message"
+)
 
 
 def start_text_for(user_id: int, storage: Storage) -> str:
@@ -17,6 +24,7 @@ def start_text_for(user_id: int, storage: Storage) -> str:
 
 
 @router.message(CommandStart())
+@router.message(Command("help"))
 async def start(message: Message, storage: Storage) -> None:
     user_id = message.from_user.id if message.from_user else 0
     await message.answer(start_text_for(user_id, storage))

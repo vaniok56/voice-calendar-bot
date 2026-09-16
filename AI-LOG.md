@@ -3,7 +3,7 @@
 ## AI tool
 
 Enviroment - Opencode
-Models used - `openai/gpt-5.6-sol`/ openai/gpt-5.6-terra`.
+Models used - `openai/gpt-5.6-sol` / `openai/gpt-5.6-terra`.
 
 
 ## Initial prompt
@@ -17,7 +17,7 @@ create the skeleton based on this repo. like a bot template unrelated to anythin
 ## Three most influential prompts
 
 1. Initial prompt.
-2. TBD
+2. "{any_prompt} Don't rush. Ask any questions. Don't hesitate."
 3. TBD
 
 ## AI mistakes and corrections

@@ -1,0 +1,10 @@
+.env*
+!.env.example
+.git/
+.venv/
+*.py[cod]
+.DS_Store
+data/
+logs/
+AI-LOG.md
+README.md

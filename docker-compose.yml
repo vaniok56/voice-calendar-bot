@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      LOG_DIR: /logs
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

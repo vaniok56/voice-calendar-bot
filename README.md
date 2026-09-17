@@ -4,6 +4,8 @@ Minimal private aiogram bot template with owner-managed access, admin ranks, fil
 
 Allowed users can send voice messages directly. The bot queues downloads, preserves Telegram's original OGG/Opus format, and replies with filename, size, and duration.
 
+Currently requires an id and a comment after the sent voice message for testing purposes.
+
 ## Commands
 
 - `/start` - verify bot is running.
@@ -20,10 +22,10 @@ Allowed users can send voice messages directly. The bot queues downloads, preser
 
 - [x] Set up the repository, Docker deployment, private access, and logging.
 - [x] Receive, queue, and store Telegram voice messages.
+- [x] Build a fixed Romanian, Russian, and English ASR corpus and benchmark local models.
 
 ### Next
 
-- [ ] Build a fixed Romanian, Russian, and English ASR corpus and benchmark local models.
 - [ ] Select an ASR model and return transcripts for Telegram voice messages.
 - [ ] Support mixed-language recordings when the selected ASR model handles them reliably.
 - [ ] Benchmark local models for structured event extraction.

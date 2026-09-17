@@ -4,6 +4,8 @@
 
 This benchmark compares nine speech-to-text models on 30 Telegram voice messages. The recordings stay private. References, transcripts, and measurements contain no personal data.
 
+Hosted APIs are tracked separately in [Cloud ASR model comparison](cloud-models-comparison.md). Cloud results join the same scorer only after their private result files exist.
+
 ## Hardware
 
 | Item | Value |
@@ -29,9 +31,9 @@ Forced-language Parakeet passes produced identical output and did not recover co
 
 ## Current choice
 
-Canary-1B-v2 had the best monolingual score: 36.96% macro WER and 19.71% macro CER. Median transcription time was 3.01 seconds. Parakeet TDT 0.6B v3 Q8 is the fallback when memory matters. It used 879 MiB instead of Canary's 4605 MiB and ran slightly faster, but its macro WER was 11.85 percentage points worse.
+Canary-1B-v2 had the best monolingual literal score: 36.96% macro WER and 19.71% macro CER. Median transcription time was 3.01 seconds.
 
-Canary is not the production default yet. Its mixed-language decoder repeated text until the 512-token limit on `MIX-06`. Integration needs an output-length guard.
+However, in blind semantic calendar-extraction judging (evaluated with Gemini 3.6 Flash), **Parakeet TDT 0.6B v3 Q8 won among all local models** with an 86.47% mean semantic score (vs Canary's 83.27%) and 90.50% on mixed-language recordings (vs Canary's 69.67%). Combined with its 2.22s warm time and 879 MiB RAM footprint (vs Canary's 4605 MiB), Parakeet is the overall top local deployment choice. Canary is the fallback when literal Romanian spelling matters and language hints are known.
 
 ## New candidates
 
@@ -126,12 +128,49 @@ The run completed all 270 evaluations on the same 30 recordings, using five CPU 
 - Every model produced 30 unique, parseable result rows with zero runtime errors, duplicates, missing IDs, or unexpected IDs.
 - Full outputs remain private on `reactor` under `data/asr-benchmark`; no recordings were copied into the repository.
 
+## Semantic usability evaluation (LLM-as-a-judge)
+
+Literal WER/CER penalizes phonetic spelling, punctuation differences, and sound annotations even when downstream calendar extraction would succeed completely. To measure real-world usefulness, we ran a blind semantic usability evaluation across all 30 recordings using **Gemini 3.6 Flash** as an independent judge (360 blind judgments total).
+
+### Judging protocol
+- **Model anonymization:** Model names were masked with SHA-256 derived tags (e.g., `K7-VQ`). Output order was shuffled independently for each recording batch.
+- **Task:** The judge compared raw transcript `text` against the canonical reference `original`, identifying every distinct intended calendar detail (action, title, date, time, duration, location, recurrence, reminder, corrections).
+- **Scoring formula:**
+  $$\text{Score} = \frac{\text{Credit for intended details}}{\text{Total intended details} + \text{Hallucinated calendar details}}$$
+  - `1.0`: fully preserved and unambiguous.
+  - `0.5`: partially preserved or ambiguous.
+  - `0.0`: missing, contradicted, or hallucinated.
+- **Verdicts:**
+  - `fully_usable`: 100% of intended details preserved.
+  - `partially_usable`: core details survive, but some partial/missing/wrong.
+  - `unusable`: no reliable calendar command reconstructable.
+
+### Local model semantic results
+
+| Model | Mean score | Median | Fully usable | Partially usable | Unusable | RO score | RU score | EN score | MIX score | Partial / Missing / Wrong items |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| **Parakeet TDT 0.6B v3 Q8** | **86.47%** | **0.92** | **46.67%** | 53.33% | **0.00%** | 68.38% | 98.75% | **89.25%** | **90.50%** | 30 / 3 / 3 |
+| NVIDIA Canary-1B-v2 | 83.27% | 0.90 | 33.33% | 66.67% | **0.00%** | **76.38%** | 98.75% | 84.88% | 69.67% | 25 / 6 / 7 |
+| Whisper Large-v3-Turbo Q5 | 80.80% | 0.91 | 43.33% | 50.00% | 6.67% | 52.50% | 97.50% | 86.50% | 88.67% | 21 / 12 / 6 |
+| Omnilingual LLM Unlimited 300M | 80.60% | 0.90 | 40.00% | 60.00% | **0.00%** | 61.25% | 97.50% | 79.50% | 85.33% | 31 / 9 / 5 |
+| Omnilingual CTC 300M v2 | 78.77% | 0.80 | 36.67% | 63.33% | **0.00%** | 66.88% | 88.75% | 78.50% | 81.67% | 34 / 9 / 6 |
+| Whisper Small Q5 | 78.37% | 0.85 | 36.67% | 60.00% | 3.33% | 48.38% | 96.25% | 82.75% | 88.67% | 28 / 12 / 7 |
+| Qwen3-ASR 0.6B | 78.33% | 0.80 | 40.00% | 56.67% | 3.33% | 51.62% | 95.00% | 85.25% | 82.50% | 29 / 10 / 9 |
+| Qwen3-ASR 1.7B | 76.60% | 0.80 | 36.67% | 63.33% | **0.00%** | 53.25% | 97.50% | 85.25% | 68.33% | 26 / 13 / 10 |
+| Whisper Medium Q5 | 75.20% | 0.84 | 40.00% | 46.67% | 13.33% | 44.00% | 97.50% | 87.75% | 70.33% | 20 / 23 / 4 |
+
+### Semantic findings
+1. **Parakeet TDT 0.6B v3 Q8 is the local semantic winner.** Despite phonetic spelling on Romanian driving up its literal WER (98.01%), the semantic judge recovered calendar intent easily (68.38% RO score, 90.50% MIX score). Across all 30 clips, Parakeet had only 3 missing and 3 wrong details with 0 unusable verdicts.
+2. **Canary-1B-v2 dropped in mixed speech.** Canary achieved the highest Romanian semantic score among local models (76.38%), but hallucination/repetition on code-switched recordings pulled its mixed score down to 69.67% and total score to 83.27%.
+3. **Whisper Medium suffered the most critical omissions.** 13.33% of its transcriptions were marked completely unusable, with 23 missing calendar fields.
+
 ## Summary
 
-1. **Canary-1B-v2 for best overall accuracy.** It won both primary accuracy measures with 36.96% macro WER and 19.71% macro CER. Its 3.01-second median was also close to Parakeet. Use it when the source language is known and 4.5 GiB of RAM is available. Add an output-length guard before production because `MIX-06` triggered repetitive generation.
-2. **Parakeet TDT 0.6B v3 Q8 for normal production use on `reactor`.** It ran fastest at 2.22 seconds and used only 879 MiB. Accuracy was lower at 48.81% macro WER, especially on Romanian, but it leaves far more memory the OS.
-3. **Qwen3-ASR 1.7B for English-heavy or offline work.** It had the best English WER at 16.55% and the second-best macro WER at 46.00%. Its 17.33-second median and 11.7 GiB peak make it a poor fit, but it is useful when accuracy matters more than latency and memory.
+1. **Parakeet TDT 0.6B v3 Q8 for primary production deployment on `reactor`.** It achieved the best local semantic usability (86.47%), fastest warm latency (2.22s), lowest memory footprint (879 MiB), and 0% unusable rate.
+2. **Canary-1B-v2 for literal transcription accuracy.** It won literal metrics with 36.96% macro WER and 19.71% macro CER, and scored 76.38% semantic score on Romanian. Use when exact Romanian orthography is required, language hints are available, and 4.6 GiB RAM is budgeted.
+3. **Qwen3-ASR 1.7B for English-specialized tasks.** Best English literal WER (16.55%) and strong English semantic score (85.25%), but high latency (17.33s) and 11.7 GiB RAM limit practical interactive deployment.
 
-Canary is the benchmark winner. Parakeet is the safer deployment choice.
+Parakeet is the production choice for local calendar voice extraction. Canary is the runner-up for literal accuracy.
 
 See [selected raw output comparison](asr-output-comparison.md) for every model's transcript of `RO-08`, `RU-08`, `EN-08`, and `MIX-06` beside the references.
+See [cloud models comparison](cloud-models-comparison.md) for hosted API semantic benchmarks.

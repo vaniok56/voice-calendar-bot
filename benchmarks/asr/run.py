@@ -38,6 +38,15 @@ MODELS_TO_RUN = [
     ("omni-llm-unlimited-300m-v2", "asr-omni", ["omniASR_LLM_Unlimited_300M_v2"]),
 ]
 
+# Cloud results use the same JSONL schema as local runners.  They are optional:
+# include them in reports only after the cloud runner has produced a result file.
+CLOUD_MODEL_NAMES = (
+    "gemini-3.5-transcribe",
+    "gemini-3.5-transcribe-live",
+    "assemblyai-universal-2",
+    "elevenlabs-scribe-v2",
+)
+
 IMAGES = {
     "asr-native": "Dockerfile.native",
     "asr-qwen": "Dockerfile.qwen",
@@ -53,7 +62,7 @@ def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
 def parse_references() -> dict[str, dict[str, str]]:
     references = {}
     pattern = re.compile(r"^\| ((?:RO|RU|EN|MIX)-\d{2}) \| (.*?) \| (.*?) \|$")
-    for line in (ROOT / "asr-corpus.md").read_text(encoding="utf-8").splitlines():
+    for line in (BENCH / "asr-corpus.md").read_text(encoding="utf-8").splitlines():
         match = pattern.match(line)
         if not match:
             continue
@@ -254,10 +263,14 @@ def score_all() -> None:
     manifest = {item["id"]: item for item in json.loads(MANIFEST.read_text(encoding="utf-8"))}
     summaries = []
     detail_rows = []
-    for name, _, _ in MODELS_TO_RUN:
+    model_names = [name for name, _, _ in MODELS_TO_RUN]
+    model_names.extend(name for name in CLOUD_MODEL_NAMES if (RESULTS / f"{name}.jsonl").exists())
+    for name in model_names:
         model_results = load_results(RESULTS / f"{name}.jsonl")
         language_totals = {language: [0, 0, 0, 0] for language in ("RO", "RU", "EN", "MIX")}
         elapsed = []
+        finalization = []
+        real_time_factors = []
         failures = 0
         for corpus_id, item in manifest.items():
             result = model_results.get(corpus_id)
@@ -269,6 +282,10 @@ def score_all() -> None:
             for index, value in enumerate(values):
                 bucket[index] += value
             elapsed.append(float(result.get("elapsed_seconds", 0)))
+            if result.get("finalization_seconds") is not None:
+                finalization.append(float(result["finalization_seconds"]))
+            if result.get("real_time_factor") is not None:
+                real_time_factors.append(float(result["real_time_factor"]))
             detail_rows.append({
                 "model": name,
                 "id": corpus_id,
@@ -280,6 +297,9 @@ def score_all() -> None:
                 "character_errors": values[2],
                 "reference_characters": values[3],
                 "elapsed_seconds": result.get("elapsed_seconds"),
+                "audio_seconds": result.get("audio_seconds"),
+                "finalization_seconds": result.get("finalization_seconds"),
+                "real_time_factor": result.get("real_time_factor"),
                 "peak_rss_kib": result.get("peak_rss_kib"),
                 "status": result.get("status"),
             })
@@ -297,6 +317,12 @@ def score_all() -> None:
         summary["macro_wer"] = statistics.mean(wers) if len(wers) == 3 else None
         summary["macro_cer"] = statistics.mean(cers) if len(cers) == 3 else None
         summary["median_seconds"] = statistics.median(elapsed) if elapsed else None
+        summary["median_finalization_seconds"] = (
+            statistics.median(finalization) if finalization else None
+        )
+        summary["median_real_time_factor"] = (
+            statistics.median(real_time_factors) if real_time_factors else None
+        )
         summary["max_peak_rss_kib"] = max(
             (int(result.get("peak_rss_kib") or 0) for result in model_results.values()),
             default=0,
@@ -326,17 +352,26 @@ def write_summary_markdown(summaries: list[dict]) -> None:
     lines = [
         "# ASR benchmark results",
         "",
-        "| Model | Complete | Failed | RO WER | RU WER | EN WER | Macro WER | Mixed WER | Macro CER | Median time | Peak RSS |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Model | Complete | Failed | RO WER | RU WER | EN WER | Macro WER | Mixed WER | Macro CER | Median time | Final latency | RTF | Peak RSS |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in summaries:
         median = "" if row["median_seconds"] is None else f"{row['median_seconds']:.2f}s"
+        finalization = (
+            "" if row["median_finalization_seconds"] is None
+            else f"{row['median_finalization_seconds']:.2f}s"
+        )
+        real_time_factor = (
+            "" if row["median_real_time_factor"] is None
+            else f"{row['median_real_time_factor']:.2f}x"
+        )
         memory = "" if not row["max_peak_rss_kib"] else f"{row['max_peak_rss_kib'] / 1024:.0f} MiB"
         lines.append(
             f"| {row['model']} | {row['completed']}/30 | {row['failures']} | "
             f"{percentage(row['ro_wer'])} | {percentage(row['ru_wer'])} | "
             f"{percentage(row['en_wer'])} | {percentage(row['macro_wer'])} | "
-            f"{percentage(row['mix_wer'])} | {percentage(row['macro_cer'])} | {median} | {memory} |"
+            f"{percentage(row['mix_wer'])} | {percentage(row['macro_cer'])} | {median} | "
+            f"{finalization} | {real_time_factor} | {memory} |"
         )
     complete = all(row["completed"] == 30 for row in summaries)
     lines.extend(["", f"Run complete: {'yes' if complete else 'no'}", ""])

@@ -42,6 +42,7 @@ async def main_async(config: Config) -> None:
             bot,
             storage=storage,
             voice_queue=voice_queue,
+            voice_dir=voice_dir,
         )
     finally:
         log.info("Bot stopping")

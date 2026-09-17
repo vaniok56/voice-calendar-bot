@@ -12,6 +12,7 @@ START_TEXT = (
     "Format: OGG/Opus\n"
     "Maximum size: 2 MiB\n"
     "Retention: up to 7 days\n\n"
+    "After upload, reply with the corpus ID and recording notes.\n\n"
     "/start - show this message\n"
     "/help - show this message"
 )

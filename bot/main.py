@@ -55,6 +55,7 @@ async def main_async(config: Config) -> None:
         await dispatcher.start_polling(
             bot,
             storage=storage,
+            drafts={},
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.elevenlabs_model,
             mistral_api_key=config.mistral_api_key,
@@ -63,6 +64,7 @@ async def main_async(config: Config) -> None:
             voice_root=voice_root,
             text_root=text_root,
             voice_retention_hours=config.voice_retention_hours,
+            debug=config.debug,
         )
     finally:
         log.info("Bot stopping")

@@ -80,6 +80,11 @@ HOUR_UNITS = {"ora", "ore", "час", "часа", "часов", "hour", "hours",
 DAY_UNITS = {"zi", "zile", "ziua", "день", "дня", "дней", "day", "days"}
 ARTICLES = {"un", "o", "una", "unu", "a", "an"}
 
+ALL_DAY_MARKERS = re.compile(
+    r"\b(all day|whole day|full day|toata ziua|ziua intreaga|"
+    r"весь день|целый день|круглосуточно)\b"
+)
+
 # (pattern, number table, hour offset, minute)
 _TIME_FORMS = (
     (r"fara\s+(?:un\s+)?sfert(?:\s+de)?\s+([\w-]+)", NUM, -1, 45),
@@ -179,6 +184,8 @@ def parse_date(text: str, reference: date):
     body = fold(text)
     if not body:
         return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", body):
+        return date.fromisoformat(body)
     tokens = body.split()
     for token in tokens:
         if token in REL:
@@ -267,10 +274,13 @@ def resolve(extraction: dict, reference: date | None = None) -> dict:
         clock and ":" not in time_text and _meridiem(fold(time_text)) is None and clock[0] <= 12
     )
 
-    all_day = event_type == "birthday"
+    all_day = event_type == "birthday" or bool(
+        time_text and ALL_DAY_MARKERS.search(fold(time_text).replace("-", " "))
+    )
     start = None
-    if day and clock:
-        start = datetime(day.year, day.month, day.day, clock[0], clock[1])
+    if day and (clock or all_day):
+        hour, minute = clock if clock else (0, 0)
+        start = datetime(day.year, day.month, day.day, hour, minute)
     if end_clock and start:
         end = datetime(start.year, start.month, start.day, end_clock[0], end_clock[1])
         if end < start:
@@ -299,7 +309,7 @@ def resolve(extraction: dict, reference: date | None = None) -> dict:
     if operation == "create":
         if not extraction.get("title"):
             missing.append("title")
-        if not all_day and day is None:
+        if day is None:
             missing.append("date_text")
         if not all_day and clock is None:
             missing.append("time_text")
@@ -309,13 +319,14 @@ def resolve(extraction: dict, reference: date | None = None) -> dict:
         "event_type": event_type,
         "title": extraction.get("title"),
         "start": start.replace(tzinfo=CHISINAU).isoformat() if start else None,
+        "date": day.isoformat() if day else None,
         "all_day": all_day,
         "duration_minutes": duration,
         "location": extraction.get("location_text"),
         "recurrence": recurrence,
         "reminders_minutes": sorted(set(offsets)),
         "ambiguous": ambiguous,
-        "complete": all_day or start is not None,
+        "complete": start is not None,
         "missing": missing,
         "unresolved": unresolved,
     }

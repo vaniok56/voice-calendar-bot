@@ -20,6 +20,7 @@ class Config:
     log_retention_days: int
     voice_retention_hours: int
     voice_cleanup_interval_seconds: int
+    debug: bool
 
 
 def _int_env(name: str, default: str) -> int:
@@ -73,6 +74,8 @@ def load_config() -> Config:
     if voice_cleanup_interval_seconds <= 0:
         raise RuntimeError("VOICE_CLEANUP_INTERVAL_SECONDS must be positive")
 
+    debug = os.environ.get("DEBUG", "false").strip().lower() == "true"
+
     return Config(
         bot_token=token,
         owner_id=owner_id,
@@ -87,4 +90,5 @@ def load_config() -> Config:
         log_retention_days=retention_days,
         voice_retention_hours=voice_retention_hours,
         voice_cleanup_interval_seconds=voice_cleanup_interval_seconds,
+        debug=debug,
     )

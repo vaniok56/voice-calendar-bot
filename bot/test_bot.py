@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -6,6 +7,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiogram.exceptions import TelegramBadRequest
+
 from .asr import (
     ASRServiceError,
     TranscriptionResponse,
@@ -13,9 +16,16 @@ from .asr import (
     transcribe_voice,
 )
 from .config import Config, load_config
+from .drafts import Draft, apply_answer, next_field
 from .extraction import Extraction, ExtractionServiceError, _parse_content, coerce, extract_event
-from .handlers.voice import format_resolved, run_extraction
-from .resolver import resolve
+from .handlers.voice import (
+    _question_keyboard,
+    _question_text,
+    format_resolved,
+    reply_event,
+    run_extraction,
+)
+from .resolver import parse_date, resolve
 
 
 class TestASR(unittest.TestCase):
@@ -210,6 +220,37 @@ class TestResolver(unittest.TestCase):
         self.assertIsNone(payload["recurrence"])
         self.assertIn("recurrence_text", payload["unresolved"])
 
+    def test_all_day_keeps_date_and_needs_one(self):
+        payload = resolve({
+            "operation": "create", "event_type": "birthday", "title": "Ana",
+            "date_text": "maine",
+        }, reference=date(2026, 9, 19))
+        self.assertTrue(payload["all_day"])
+        self.assertEqual(payload["date"], "2026-09-20")
+        self.assertEqual(payload["start"], "2026-09-20T00:00:00+03:00")
+        self.assertTrue(payload["complete"])
+        self.assertEqual(payload["missing"], [])
+
+        dateless = resolve({
+            "operation": "create", "event_type": "birthday", "title": "Ana",
+        }, reference=date(2026, 9, 19))
+        self.assertFalse(dateless["complete"])
+        self.assertEqual(dateless["missing"], ["date_text"])
+
+    def test_all_day_marker_for_any_type(self):
+        for phrase in ("All day", "all-day", "toată ziua", "весь день"):
+            payload = resolve({
+                "operation": "create", "event_type": "appointment", "title": "Dentist",
+                "date_text": "maine", "time_text": phrase,
+            }, reference=date(2026, 9, 19))
+            self.assertTrue(payload["all_day"], phrase)
+            self.assertEqual(payload["date"], "2026-09-20")
+            self.assertTrue(payload["complete"], phrase)
+            self.assertEqual(payload["missing"], [], phrase)
+
+    def test_iso_date_from_button_callback(self):
+        self.assertEqual(parse_date("2026-09-20", date(2026, 9, 19)), date(2026, 9, 20))
+
     def test_missing_fields_for_create(self):
         payload = resolve({
             "operation": "create", "event_type": "meeting",
@@ -264,6 +305,115 @@ class TestFormatResolved(unittest.TestCase):
         self.assertIn("1 h 30 min", text)
         self.assertIn("2 h, 30 min before", text)
         self.assertIn("13:30", text)
+
+
+class TestDraftFlow(unittest.TestCase):
+    REFERENCE = date(2026, 9, 19)
+
+    def test_next_field(self):
+        self.assertIsNone(next_field({"missing": []}))
+        self.assertEqual(next_field({"missing": ["title", "time_text"]}), "title")
+
+    def test_begin_keeps_independent_copy(self):
+        drafts = {}
+        raw = {"operation": "create"}
+        drafts[1] = Draft(raw=dict(raw), awaiting="title")
+        raw["title"] = "mutated"
+        self.assertIsNone(drafts[1].raw.get("title"))
+
+    def test_answers_complete_draft_one_field_at_a_time(self):
+        draft = Draft(raw={"operation": "create", "event_type": "meeting"}, awaiting="title")
+        resolve_fn = lambda raw: resolve(raw, reference=self.REFERENCE)
+
+        apply_answer(draft, "sync", resolve_fn)
+        self.assertEqual(draft.awaiting, "date_text")
+
+        apply_answer(draft, "maine", resolve_fn)
+        self.assertEqual(draft.awaiting, "time_text")
+
+        resolved = apply_answer(draft, "10:00", resolve_fn)
+        self.assertEqual(next_field(resolved), None)
+        self.assertEqual(resolved["start"], "2026-09-20T10:00:00+03:00")
+        self.assertTrue(resolved["complete"])
+
+    def test_unparseable_answer_reasks_same_field(self):
+        draft = Draft(
+            raw={"operation": "create", "event_type": "meeting", "title": "sync"},
+            awaiting="date_text",
+        )
+        resolved = apply_answer(
+            draft, "la pranz", lambda raw: resolve(raw, reference=self.REFERENCE)
+        )
+        self.assertEqual(draft.awaiting, "date_text")
+        self.assertFalse(resolved["complete"])
+
+
+class TestQuestions(unittest.TestCase):
+    REFERENCE = date(2026, 9, 19)
+
+    def test_question_text_uses_title(self):
+        resolved = {"title": "Dentist"}
+        self.assertEqual(_question_text("title", resolved), "❓ What should I call this event?")
+        self.assertIn("<b>Dentist</b>", _question_text("time_text", resolved))
+
+    def test_date_keyboard_offers_today_and_tomorrow(self):
+        markup = _question_keyboard("date_text", self.REFERENCE)
+        data = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertIn("ans:date_text:2026-09-19", data)
+        self.assertIn("ans:date_text:2026-09-20", data)
+        self.assertIn("q_cancel", data)
+
+    def test_time_keyboard_has_all_day(self):
+        markup = _question_keyboard("time_text", self.REFERENCE)
+        data = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertIn("ans:time_text:all day", data)
+        self.assertIn("ans:time_text:09:00", data)
+
+
+class TestReplyEvent(unittest.TestCase):
+    REFERENCE = date(2026, 9, 19)
+
+    def _message(self):
+        sent = MagicMock()
+        sent.chat.id = -100
+        sent.message_id = 555
+        message = MagicMock()
+        message.message_id = 42
+        message.answer = AsyncMock(return_value=sent)
+        return message
+
+    def test_first_turn_stores_prompt_handle(self):
+        message = self._message()
+        drafts = {}
+        resolved = resolve(
+            {"operation": "create", "event_type": "meeting"}, reference=self.REFERENCE
+        )
+        asyncio.run(reply_event(message, MagicMock(), drafts, 1, {}, resolved, None))
+        draft = drafts.get(1)
+        self.assertEqual(draft.awaiting, "title")
+        self.assertEqual((draft.chat_id, draft.message_id), (-100, 555))
+
+    def test_typed_answer_edits_stored_message(self):
+        resolved = resolve(
+            {"operation": "create", "event_type": "meeting", "title": "sync"},
+            reference=self.REFERENCE,
+        )
+        cases = {
+            "edit": None,
+            "not_modified": TelegramBadRequest(
+                method=MagicMock(), message="message is not modified"
+            ),
+        }
+        for name, side_effect in cases.items():
+            with self.subTest(name):
+                message = self._message()
+                bot = MagicMock()
+                bot.edit_message_text = AsyncMock(side_effect=side_effect)
+                drafts = {1: Draft({}, "date_text", chat_id=-100, message_id=555)}
+                asyncio.run(reply_event(message, bot, drafts, 1, {}, resolved, None))
+                self.assertEqual(bot.edit_message_text.await_args.kwargs["chat_id"], -100)
+                self.assertEqual(bot.edit_message_text.await_args.kwargs["message_id"], 555)
+                message.answer.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -98,6 +98,15 @@ def _parse_content(content: str) -> dict:
     return parsed
 
 
+def coerce(raw: dict) -> dict:
+    """Fold schema drift onto safe defaults: enums and the reminder list."""
+    raw["operation"] = raw.get("operation") if raw.get("operation") in OPERATIONS else "create"
+    raw["event_type"] = raw.get("event_type") if raw.get("event_type") in EVENT_TYPES else "other"
+    if not isinstance(raw.get("reminder_texts"), list):
+        raw["reminder_texts"] = []
+    return raw
+
+
 def _sync_extract(text: str, api_key: str, model: str, timeout: int) -> Extraction:
     request = urllib.request.Request(
         MISTRAL_BASE_URL + "/chat/completions",
@@ -140,7 +149,7 @@ def _sync_extract(text: str, api_key: str, model: str, timeout: int) -> Extracti
             raise last_error
         content = choices[0].get("message", {}).get("content", "")
         try:
-            raw = _parse_content(content)
+            raw = coerce(_parse_content(content))
         except ExtractionServiceError as error:
             last_error = error
             if retry:

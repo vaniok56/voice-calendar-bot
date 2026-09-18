@@ -13,7 +13,7 @@ from .asr import (
     transcribe_voice,
 )
 from .config import Config, load_config
-from .extraction import Extraction, ExtractionServiceError, _parse_content, extract_event
+from .extraction import Extraction, ExtractionServiceError, _parse_content, coerce, extract_event
 from .handlers.voice import format_resolved, run_extraction
 from .resolver import resolve
 
@@ -95,6 +95,13 @@ class TestExtraction(unittest.TestCase):
             _parse_content("not json")
         with self.assertRaises(ExtractionServiceError):
             _parse_content("[1, 2, 3]")
+
+    def test_coerce_out_of_enum(self):
+        coerced = coerce({"operation": "remind", "event_type": "party",
+                          "reminder_texts": "oops"})
+        self.assertEqual(coerced["operation"], "create")
+        self.assertEqual(coerced["event_type"], "other")
+        self.assertEqual(coerced["reminder_texts"], [])
 
     @patch("bot.extraction.urllib.request.urlopen")
     def test_extract_event_success(self, mock_urlopen):

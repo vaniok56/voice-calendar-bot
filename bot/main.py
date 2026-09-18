@@ -40,11 +40,20 @@ async def main_async(config: Config) -> None:
     )
 
     try:
-        log.info("Bot starting owner=%s model=elevenlabs-scribe-v2", config.owner_id)
+        log.info(
+            "Bot starting owner=%s model=%s extraction=%s",
+            config.owner_id,
+            config.elevenlabs_model,
+            config.extraction_model,
+        )
         await dispatcher.start_polling(
             bot,
             storage=storage,
             elevenlabs_api_key=config.elevenlabs_api_key,
+            elevenlabs_model=config.elevenlabs_model,
+            mistral_api_key=config.mistral_api_key,
+            extraction_model=config.extraction_model,
+            extraction_timeout=config.extraction_timeout,
             voice_root=voice_root,
             voice_retention_hours=config.voice_retention_hours,
         )

@@ -10,6 +10,10 @@ class Config:
     bot_token: str
     owner_id: int
     elevenlabs_api_key: str
+    elevenlabs_model: str
+    mistral_api_key: str
+    extraction_model: str
+    extraction_timeout: int
     data_dir: Path
     log_dir: Path
     log_level: str
@@ -34,6 +38,19 @@ def load_config() -> Config:
     elevenlabs_key = os.environ.get("ELEVENLABS_API", "").strip()
     if not elevenlabs_key:
         raise RuntimeError("ELEVENLABS_API must be set in .env")
+    elevenlabs_model = os.environ.get("ELEVENLABS_MODEL", "scribe_v2").strip()
+    if not elevenlabs_model:
+        raise RuntimeError("ELEVENLABS_MODEL must not be empty")
+
+    mistral_key = os.environ.get("MISTRAL_API", "").strip()
+    if not mistral_key:
+        raise RuntimeError("MISTRAL_API must be set in .env")
+    extraction_model = os.environ.get("EXTRACTION_MODEL", "mistral-large-latest").strip()
+    if not extraction_model:
+        raise RuntimeError("EXTRACTION_MODEL must not be empty")
+    extraction_timeout = int(os.environ.get("EXTRACTION_TIMEOUT", "60"))
+    if extraction_timeout <= 0:
+        raise RuntimeError("EXTRACTION_TIMEOUT must be positive")
 
     retention_days = int(os.environ.get("LOG_RETENTION_DAYS", "7"))
     if retention_days <= 0:
@@ -53,6 +70,10 @@ def load_config() -> Config:
         bot_token=token,
         owner_id=owner_id,
         elevenlabs_api_key=elevenlabs_key,
+        elevenlabs_model=elevenlabs_model,
+        mistral_api_key=mistral_key,
+        extraction_model=extraction_model,
+        extraction_timeout=extraction_timeout,
         data_dir=Path(os.environ.get("DATA_DIR", "data")).expanduser().resolve(),
         log_dir=Path(os.environ.get("LOG_DIR", "logs")).expanduser().resolve(),
         log_level=log_level,

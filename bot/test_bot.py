@@ -172,6 +172,35 @@ class TestResolver(unittest.TestCase):
         self.assertEqual(payload["reminders_minutes"], [30, 120])
         self.assertNotIn("reminder_texts", payload["unresolved"])
 
+    def test_trip_duration_is_not_zero(self):
+        payload = resolve({
+            "operation": "create", "event_type": "trip", "title": "excursie",
+            "date_text": "sambata", "time_text": "11:00", "duration_text": None,
+            "end_time_text": None, "location_text": None, "recurrence_text": None,
+            "reminder_texts": [],
+        }, reference=date(2026, 9, 18))
+        self.assertIsNone(payload["duration_minutes"])
+
+    def test_unsupported_recurrence_reported(self):
+        payload = resolve({
+            "operation": "create", "event_type": "meeting", "title": "sync",
+            "date_text": "maine", "time_text": "10:00", "duration_text": None,
+            "end_time_text": None, "location_text": None, "recurrence_text": "каждый день",
+            "reminder_texts": [],
+        }, reference=date(2026, 9, 18))
+        self.assertIsNone(payload["recurrence"])
+        self.assertIn("recurrence_text", payload["unresolved"])
+
+    def test_missing_fields_for_create(self):
+        payload = resolve({
+            "operation": "create", "event_type": "meeting",
+        }, reference=date(2026, 9, 18))
+        self.assertEqual(payload["missing"], ["title", "date_text", "time_text"])
+        list_payload = resolve({
+            "operation": "list", "event_type": "other",
+        }, reference=date(2026, 9, 18))
+        self.assertEqual(list_payload["missing"], [])
+
 
 class TestRunExtraction(unittest.TestCase):
     @patch("bot.handlers.voice.extract_event", new_callable=AsyncMock)

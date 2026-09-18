@@ -20,7 +20,6 @@ DEFAULT_DURATION = {
     "call": 30,
     "reminder": 15,
     "task": 30,
-    "trip": 0,
     "other": 60,
 }
 
@@ -257,9 +256,8 @@ def resolve(extraction: dict, reference: date | None = None) -> dict:
     clock = parse_time(time_text) if time_text else None
     duration = _parse_offset(duration_text) if duration_text else None
     end_clock = parse_time(end_text) if end_text else None
-    recurrence = parse_recurrence(extraction.get("recurrence_text")) if extraction.get(
-        "recurrence_text"
-    ) else None
+    recurrence_text = extraction.get("recurrence_text")
+    recurrence = parse_recurrence(recurrence_text) if recurrence_text else None
     if day is None and recurrence:
         weekday = recurrence["weekday"]
         day = reference + timedelta(days=(weekday - reference.weekday()) % 7 or 7)
@@ -291,9 +289,20 @@ def resolve(extraction: dict, reference: date | None = None) -> dict:
         unresolved.append("end_time_text")
     if any(_parse_offset(item) is None for item in reminders):
         unresolved.append("reminder_texts")
+    if recurrence_text and recurrence is None:
+        unresolved.append("recurrence_text")
 
     if duration is None and start is not None and not all_day:
         duration = DEFAULT_DURATION.get(event_type)
+
+    missing = []
+    if operation == "create":
+        if not extraction.get("title"):
+            missing.append("title")
+        if not all_day and day is None:
+            missing.append("date_text")
+        if not all_day and clock is None:
+            missing.append("time_text")
 
     return {
         "operation": operation,
@@ -307,5 +316,6 @@ def resolve(extraction: dict, reference: date | None = None) -> dict:
         "reminders_minutes": sorted(set(offsets)),
         "ambiguous": ambiguous,
         "complete": all_day or start is not None,
+        "missing": missing,
         "unresolved": unresolved,
     }

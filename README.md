@@ -2,9 +2,7 @@
 
 Minimal private aiogram bot template with owner-managed access, admin ranks, file logging, and Docker deployment.
 
-Allowed users can send voice messages directly. The bot queues downloads, preserves Telegram's original OGG/Opus format, and replies with filename, size, and duration.
-
-Currently requires an id and a comment after the sent voice message for testing purposes.
+Allowed users can send voice messages directly. The bot downloads the audio, transcribes it with ElevenLabs Scribe v2, and replies with the transcript plus language and length.
 
 ## Commands
 
@@ -67,6 +65,6 @@ Currently requires an id and a comment after the sent voice message for testing 
 
 Access data lives in `data/access.json`. Console logs use colored levels. Plain file logs use Chisinau timestamps, one dated `bot_DD_MM_YY.log` file per day, and retain seven files by default in `logs/`.
 
-Voice messages live in `data/voice` with private permissions and Chisinau timestamp filenames. Files older than seven days are removed at startup and hourly. Maximum voice size is 2 MiB (roughly 1 minute 40 seconds).
+Voice audio and metadata live under `data/voice/<user_id>/<message_id>/` (`audio.ogg` and `record.json`) with private permissions for a rolling 168 hours. Cleanup runs hourly and once at startup. Only the local mounted volume is managed by this policy; Telegram and ElevenLabs retention are controlled by those services. Legacy flat timestamp-named recordings were moved once to `data/voice-corpus/` and are not retention-managed. Maximum voice size is 2 MiB.
 
 Set `HOST_UID` and `HOST_GID` in `.env` when bind-mounted directories belong to a user other than `1000:1000`.

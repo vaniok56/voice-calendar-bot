@@ -8,11 +8,12 @@ from ..storage import Storage
 router = Router(name="start")
 
 START_TEXT = (
-    "Send a voice message to store it automatically.\n\n"
+    "🎙️ <b>Voice Calendar Bot</b>\n\n"
+    "Send any voice message to transcribe it automatically using <b>ElevenLabs Scribe v2</b>.\n\n"
+    "Supported languages: Romanian, Russian, English, and code-switched speech.\n\n"
     "Format: OGG/Opus\n"
     "Maximum size: 2 MiB\n"
     "Retention: up to 7 days\n\n"
-    "After upload, reply with the corpus ID and recording notes.\n\n"
     "/start - show this message\n"
     "/help - show this message"
 )

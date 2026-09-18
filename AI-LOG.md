@@ -3,7 +3,7 @@
 ## AI tool
 
 Enviroment - Opencode
-Models used - `openai/gpt-5.6-sol` / `openai/gpt-5.6-terra`.
+Models used - `openai/gpt-5.6-sol` / `openai/gpt-5.6-terra` / `deepseek-ai/DeepSeek-V4.1-Flash`
 
 
 ## Initial prompt
@@ -23,6 +23,7 @@ create the skeleton based on this repo. like a bot template unrelated to anythin
 ## AI mistakes and corrections
 
 1. Initial prompt did not result in adding deployment Docker skeleton and logging. After the second prompt, he missed a lot of things, such as pagination in /list_users, added an irrelevant /logs command, and made a single log file `bot.log` instead of one per day. Also exposed bot token in terminal. It needed a lot of back and forth to achieve a simple stable telegram template comfortable for me.
+2. After asking to use an ASR model to transcribe the messages in telegram - gpt-5.6-sol decided to remove the 7-day retention of the voice messages.
 
 ## Written manually
 

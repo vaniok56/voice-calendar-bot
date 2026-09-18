@@ -2,7 +2,9 @@
 
 Minimal private aiogram bot template with owner-managed access, admin ranks, file logging, and Docker deployment.
 
-Allowed users can send voice messages directly. The bot downloads the audio, transcribes it with ElevenLabs Scribe v2, and replies with the transcript plus wait time, language, length, and estimated cost.
+Allowed users can send a voice message or plain text. The bot transcribes voice with ElevenLabs Scribe v2, extracts a structured calendar event with Mistral, resolves dates, times, durations, reminders, and recurrence with deterministic code, and replies with the transcript (voice only), the raw extraction JSON, a resolved event card, and a summary with ASR and LLM wait times.
+
+Plain text skips ASR and goes straight to extraction. Voice and text records are kept under `data/` with private permissions.
 
 ## Commands
 
@@ -20,15 +22,16 @@ Allowed users can send voice messages directly. The bot downloads the audio, tra
 
 - [x] Set up the repository, Docker deployment, private access, and logging.
 - [x] Receive voice messages, transcribe them with ElevenLabs Scribe v2, and retain records for 7 days.
+- [x] Extend input to plain text messages, skipping ASR.
 - [x] Build a fixed Romanian, Russian, and English ASR corpus and benchmark local models.
 - [x] Select an ASR model and return transcripts, including code-switched Romanian, Russian, and English.
+- [x] Benchmark extraction models and return a validated event schema.
+- [x] Extract operation, event type, title, date, time, duration, end time, location, reminders, and recurrence.
+- [x] Resolve dates, times, durations, defaults, reminders, and timezone rules with deterministic code.
+- [x] Report missing, ambiguous, and unsupported fields without guessing.
 
 ### Next
 
-- [ ] Benchmark local models for structured event extraction.
-- [ ] Extract operation, event type, title, date, time, duration, end time, location, reminders, and recurrence into a validated schema.
-- [ ] Resolve dates, times, durations, defaults, reminders, and timezone rules with deterministic code.
-- [ ] Detect missing, ambiguous, or unsupported fields without guessing.
 - [ ] Ask one focused question and keep the rest of the draft while the user answers.
 - [ ] Show an event summary with `Confirm`, `Retry`, and `Cancel` buttons.
 - [ ] Prevent repeated button presses from creating duplicate events.

@@ -9,10 +9,12 @@ router = Router(name="start")
 
 START_TEXT = (
     "🎙️ <b>Voice Calendar Bot</b>\n\n"
-    "Send any voice message to transcribe it automatically using <b>ElevenLabs Scribe v2</b>.\n\n"
+    "Send a voice message or plain text to build a calendar event.\n\n"
+    "Voice is transcribed with <b>ElevenLabs Scribe v2</b>, then a model extracts "
+    "the event fields and deterministic code resolves the date, time, duration, and reminders.\n\n"
     "Supported languages: Romanian, Russian, English, and code-switched speech.\n\n"
-    "Format: OGG/Opus\n"
-    "Maximum size: 2 MiB\n"
+    "Voice format: OGG/Opus\n"
+    "Maximum voice size: 2 MiB\n"
     "Retention: up to 7 days\n\n"
     "/start - show this message\n"
     "/help - show this message"

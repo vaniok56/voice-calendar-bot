@@ -99,7 +99,9 @@ async def reply_event(message: Message, raw, resolved, seconds, error) -> None:
     raw_json = json.dumps(raw, ensure_ascii=False, indent=2)
     await message.answer(f"🧠 <b>Extraction:</b>\n<pre>{escape(raw_json)}</pre>")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{message.message_id}")
+        InlineKeyboardButton(text="✅ Confirm", callback_data=f"confirm:{message.message_id}"),
+        InlineKeyboardButton(text="🔁 Retry", callback_data=f"retry:{message.message_id}"),
+        InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel:{message.message_id}"),
     ]])
     await message.answer(format_resolved(resolved), reply_markup=keyboard)
 

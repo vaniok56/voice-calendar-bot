@@ -2,12 +2,12 @@
 
 Minimal private aiogram bot template with owner-managed access, admin ranks, file logging, and Docker deployment.
 
-Allowed users can send voice messages directly. The bot downloads the audio, transcribes it with ElevenLabs Scribe v2, and replies with the transcript plus language and length.
+Allowed users can send voice messages directly. The bot downloads the audio, transcribes it with ElevenLabs Scribe v2, and replies with the transcript plus wait time, language, length, and estimated cost.
 
 ## Commands
 
 - `/start` - verify bot is running.
-- `/help` - show voice storage information.
+- `/help` - show usage information.
 - `/admin_help` - show administration commands.
 - `/list_users` - open paginated user list with removal controls.
 - `/adduser <user_id>` - add user.
@@ -19,13 +19,12 @@ Allowed users can send voice messages directly. The bot downloads the audio, tra
 ### Done
 
 - [x] Set up the repository, Docker deployment, private access, and logging.
-- [x] Receive, queue, and store Telegram voice messages.
+- [x] Receive voice messages, transcribe them with ElevenLabs Scribe v2, and retain records for 7 days.
 - [x] Build a fixed Romanian, Russian, and English ASR corpus and benchmark local models.
+- [x] Select an ASR model and return transcripts, including code-switched Romanian, Russian, and English.
 
 ### Next
 
-- [ ] Select an ASR model and return transcripts for Telegram voice messages.
-- [ ] Support mixed-language recordings when the selected ASR model handles them reliably.
 - [ ] Benchmark local models for structured event extraction.
 - [ ] Extract operation, event type, title, date, time, duration, end time, location, reminders, and recurrence into a validated schema.
 - [ ] Resolve dates, times, durations, defaults, reminders, and timezone rules with deterministic code.

@@ -23,6 +23,9 @@ async def main_async(config: Config) -> None:
     voice_root = config.data_dir / "voice"
     voice_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 
+    text_root = config.data_dir / "text"
+    text_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+
     bot = Bot(
         token=config.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -37,6 +40,9 @@ async def main_async(config: Config) -> None:
 
     cleanup_task = asyncio.create_task(
         retention_loop(voice_root, config.voice_cleanup_interval_seconds)
+    )
+    text_cleanup_task = asyncio.create_task(
+        retention_loop(text_root, config.voice_cleanup_interval_seconds)
     )
 
     try:
@@ -55,12 +61,14 @@ async def main_async(config: Config) -> None:
             extraction_model=config.extraction_model,
             extraction_timeout=config.extraction_timeout,
             voice_root=voice_root,
+            text_root=text_root,
             voice_retention_hours=config.voice_retention_hours,
         )
     finally:
         log.info("Bot stopping")
         cleanup_task.cancel()
-        await asyncio.gather(cleanup_task, return_exceptions=True)
+        text_cleanup_task.cancel()
+        await asyncio.gather(cleanup_task, text_cleanup_task, return_exceptions=True)
         await bot.session.close()
 
 

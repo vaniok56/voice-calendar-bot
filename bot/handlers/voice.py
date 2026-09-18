@@ -80,6 +80,31 @@ def _write_record(path: Path, record: dict) -> None:
     temporary.replace(path)
 
 
+async def run_extraction(
+    text: str, *, mistral_api_key: str, extraction_model: str, extraction_timeout: int
+):
+    try:
+        extraction = await extract_event(
+            text, api_key=mistral_api_key, model=extraction_model, timeout=extraction_timeout
+        )
+        return extraction.raw, resolve(extraction.raw), extraction.wait_time_seconds, None
+    except Exception as error:
+        return None, None, None, f"{type(error).__name__}: {error}"
+
+
+async def reply_event(message: Message, raw, resolved, seconds, error) -> None:
+    if error is not None:
+        await message.answer(f"⚠️ Extraction failed: <code>{escape(error)}</code>")
+        return
+    raw_json = json.dumps(raw, ensure_ascii=False, indent=2)
+    await message.answer(f"🧠 <b>Extraction:</b>\n<pre>{escape(raw_json)}</pre>")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{message.message_id}")
+    ]])
+    await message.answer(format_resolved(resolved), reply_markup=keyboard)
+
+
+
 @router.message(F.voice)
 async def handle_voice(
     message: Message,
@@ -132,27 +157,18 @@ async def handle_voice(
             audio_path, api_key=elevenlabs_api_key, model_id=elevenlabs_model
         )
 
-        extraction_raw = None
-        resolved = None
-        extraction_seconds = None
-        extraction_error = None
-        try:
-            extraction = await extract_event(
-                result.text,
-                api_key=mistral_api_key,
-                model=extraction_model,
-                timeout=extraction_timeout,
-            )
-            extraction_raw = extraction.raw
-            extraction_seconds = extraction.wait_time_seconds
-            resolved = resolve(extraction_raw)
-        except Exception as error:
-            extraction_error = f"{type(error).__name__}: {error}"
+        extraction_raw, resolved, extraction_seconds, extraction_error = await run_extraction(
+            result.text,
+            mistral_api_key=mistral_api_key,
+            extraction_model=extraction_model,
+            extraction_timeout=extraction_timeout,
+        )
+        if extraction_error is not None:
             log.error(
                 "%s - extraction failed message_id=%s: %s",
                 user_id,
                 message.message_id,
-                error,
+                extraction_error,
             )
 
         record.update(
@@ -176,19 +192,7 @@ async def handle_voice(
         estimated_credits = round(actual_seconds * CREDITS_PER_AUDIO_SECOND)
 
         await message.answer(escape(result.text))
-        if extraction_error is not None:
-            await message.answer(
-                f"⚠️ Extraction failed: <code>{escape(extraction_error)}</code>"
-            )
-        else:
-            raw_json = json.dumps(extraction_raw, ensure_ascii=False, indent=2)
-            await message.answer(f"🧠 <b>Extraction:</b>\n<pre>{escape(raw_json)}</pre>")
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{message.message_id}")]
-                ]
-            )
-            await message.answer(format_resolved(resolved), reply_markup=keyboard)
+        await reply_event(message, extraction_raw, resolved, extraction_seconds, extraction_error)
 
         summary = [
             f"⏱️ <b>ASR wait:</b> {result.wait_time_seconds:.2f}s",
@@ -209,3 +213,67 @@ async def handle_voice(
             error,
         )
         await message.answer(f"⚠️ Transcription failed: {escape(str(error))}")
+
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_text(
+    message: Message,
+    mistral_api_key: str,
+    extraction_model: str,
+    extraction_timeout: int,
+    text_root: Path,
+    voice_retention_hours: int,
+) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    received_at = datetime.now(CHISINAU)
+    record_dir = text_root / str(user_id) / str(message.message_id)
+    try:
+        record_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
+    except FileExistsError:
+        return
+
+    record_path = record_dir / "record.json"
+    record = {
+        "received_at": received_at.isoformat(),
+        "expires_at": (received_at + timedelta(hours=voice_retention_hours)).isoformat(),
+        "status": "processing",
+        "text": message.text,
+        "extraction": None,
+        "resolved": None,
+        "extraction_error": None,
+        "error": None,
+    }
+    _write_record(record_path, record)
+
+    try:
+        extraction_raw, resolved, extraction_seconds, extraction_error = await run_extraction(
+            message.text,
+            mistral_api_key=mistral_api_key,
+            extraction_model=extraction_model,
+            extraction_timeout=extraction_timeout,
+        )
+        record.update(
+            status="completed",
+            extraction=extraction_raw,
+            resolved=resolved,
+            extraction_error=extraction_error,
+        )
+        _write_record(record_path, record)
+        if extraction_error is not None:
+            log.error(
+                "%s - text extraction failed message_id=%s: %s",
+                user_id,
+                message.message_id,
+                extraction_error,
+            )
+
+        await reply_event(message, extraction_raw, resolved, extraction_seconds, extraction_error)
+        await message.answer(
+            "🧠 <b>LLM wait:</b> "
+            + (f"{extraction_seconds:.2f}s" if extraction_seconds is not None else "n/a")
+        )
+    except Exception as error:
+        record.update(status="failed", error=f"{type(error).__name__}: {error}")
+        _write_record(record_path, record)
+        log.error("%s - text failed message_id=%s: %s", user_id, message.message_id, error)
+        await message.answer(f"⚠️ Failed: {escape(str(error))}")

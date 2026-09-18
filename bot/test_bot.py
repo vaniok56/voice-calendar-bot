@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from .asr import (
     ASRServiceError,
@@ -13,8 +13,8 @@ from .asr import (
     transcribe_voice,
 )
 from .config import Config, load_config
-from .extraction import ExtractionServiceError, _parse_content, extract_event
-from .handlers.voice import format_resolved
+from .extraction import Extraction, ExtractionServiceError, _parse_content, extract_event
+from .handlers.voice import format_resolved, run_extraction
 from .resolver import resolve
 
 
@@ -171,6 +171,35 @@ class TestResolver(unittest.TestCase):
         }, reference=date(2026, 9, 18))
         self.assertEqual(payload["reminders_minutes"], [30, 120])
         self.assertNotIn("reminder_texts", payload["unresolved"])
+
+
+class TestRunExtraction(unittest.TestCase):
+    @patch("bot.handlers.voice.extract_event", new_callable=AsyncMock)
+    def test_success(self, mock_extract):
+        mock_extract.return_value = Extraction(
+            raw={"operation": "create", "event_type": "class", "date_text": "today",
+                 "time_text": "10:00"},
+            wait_time_seconds=1.2,
+        )
+        import asyncio
+        raw, resolved, seconds, error = asyncio.run(run_extraction(
+            "lab", mistral_api_key="k", extraction_model="m", extraction_timeout=10,
+        ))
+        self.assertIsNone(error)
+        self.assertEqual(seconds, 1.2)
+        self.assertEqual(raw["operation"], "create")
+        self.assertTrue(resolved["complete"])
+
+    @patch("bot.handlers.voice.extract_event", new_callable=AsyncMock)
+    def test_failure(self, mock_extract):
+        mock_extract.side_effect = ExtractionServiceError("model returned invalid JSON")
+        import asyncio
+        raw, resolved, seconds, error = asyncio.run(run_extraction(
+            "lab", mistral_api_key="k", extraction_model="m", extraction_timeout=10,
+        ))
+        self.assertIsNone(raw)
+        self.assertIsNone(resolved)
+        self.assertIn("invalid JSON", error)
 
 
 class TestFormatResolved(unittest.TestCase):

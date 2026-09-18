@@ -23,7 +23,7 @@ def cleanup_expired(voice_root: Path) -> int:
             record = json.loads(record_path.read_text(encoding="utf-8"))
             expired = datetime.fromisoformat(record["expires_at"]) <= now
         except (OSError, ValueError, KeyError, TypeError):
-            log.warning("Voice retention: skipping malformed %s", record_path)
+            log.warning("Retention: skipping malformed %s", record_path)
             continue
         if not expired:
             continue
@@ -41,7 +41,7 @@ async def retention_loop(voice_root: Path, interval_seconds: int) -> None:
         try:
             removed = cleanup_expired(voice_root)
             if removed:
-                log.info("Removed %s expired voice record(s)", removed)
+                log.info("Removed %s expired record(s)", removed)
         except Exception:
-            log.exception("Voice retention cleanup failed")
+            log.exception("Retention cleanup failed")
         await asyncio.sleep(interval_seconds)

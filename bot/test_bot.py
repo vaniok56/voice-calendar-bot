@@ -84,6 +84,18 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             load_config()
 
+    @patch("bot.config.load_dotenv")
+    @patch.dict(os.environ, {
+        "BOT_TOKEN": "123:ABC",
+        "OWNER_ID": "999",
+        "ELEVENLABS_API": "test_eleven_key",
+        "MISTRAL_API": "test_mistral_key",
+        "EXTRACTION_TIMEOUT": "abc",
+    }, clear=True)
+    def test_load_config_bad_int(self, _mock_dotenv):
+        with self.assertRaises(RuntimeError):
+            load_config()
+
 
 class TestExtraction(unittest.TestCase):
     def test_parse_content_fenced(self):

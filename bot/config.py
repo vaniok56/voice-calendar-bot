@@ -22,6 +22,13 @@ class Config:
     voice_cleanup_interval_seconds: int
 
 
+def _int_env(name: str, default: str) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except ValueError as error:
+        raise RuntimeError(f"{name} must be an integer") from error
+
+
 def load_config() -> Config:
     load_dotenv()
     token = os.environ.get("BOT_TOKEN", "").strip()
@@ -48,21 +55,21 @@ def load_config() -> Config:
     extraction_model = os.environ.get("EXTRACTION_MODEL", "mistral-large-latest").strip()
     if not extraction_model:
         raise RuntimeError("EXTRACTION_MODEL must not be empty")
-    extraction_timeout = int(os.environ.get("EXTRACTION_TIMEOUT", "60"))
+    extraction_timeout = _int_env("EXTRACTION_TIMEOUT", "60")
     if extraction_timeout <= 0:
         raise RuntimeError("EXTRACTION_TIMEOUT must be positive")
 
-    retention_days = int(os.environ.get("LOG_RETENTION_DAYS", "7"))
+    retention_days = _int_env("LOG_RETENTION_DAYS", "7")
     if retention_days <= 0:
         raise RuntimeError("LOG_RETENTION_DAYS must be positive")
     log_level = os.environ.get("LOG_LEVEL", "INFO").strip().upper()
     if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise RuntimeError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
 
-    voice_retention_hours = int(os.environ.get("VOICE_RETENTION_HOURS", "168"))
+    voice_retention_hours = _int_env("VOICE_RETENTION_HOURS", "168")
     if voice_retention_hours <= 0:
         raise RuntimeError("VOICE_RETENTION_HOURS must be positive")
-    voice_cleanup_interval_seconds = int(os.environ.get("VOICE_CLEANUP_INTERVAL_SECONDS", "3600"))
+    voice_cleanup_interval_seconds = _int_env("VOICE_CLEANUP_INTERVAL_SECONDS", "3600")
     if voice_cleanup_interval_seconds <= 0:
         raise RuntimeError("VOICE_CLEANUP_INTERVAL_SECONDS must be positive")
 

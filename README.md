@@ -2,9 +2,16 @@
 
 Private aiogram bot that turns a voice message or plain text into a calendar event, with owner-managed access, admin ranks, file logging, and Docker deployment.
 
-Allowed users send a voice message or plain text. Voice is transcribed with ElevenLabs Scribe v2; plain text skips ASR. A Mistral model copies the fields it hears into a fixed schema, and deterministic code resolves the date, time, duration, defaults, reminders, and timezone (`Europe/Chisinau`). The bot then shows an event card. If a required field is missing, it asks one focused question at a time, keeps the rest of the draft, and offers quick replies (for example `Today` / `Tomorrow`, or `09:00` / `All day`). The card and each question live in a single message that is edited in place as the draft evolves.
+Allowed users send a voice message or plain text. Voice is transcribed with ElevenLabs Scribe v2; plain text skips ASR. DeepSeek converts the text into semantic JSON once, and deterministic code resolves date arithmetic, time, duration, defaults, reminders, recurrence, grounding, and timezone (`Europe/Chisinau`). The bot then shows an event card. If a required field is missing, it asks one focused deterministic question at a time. Clarifications do not call DeepSeek again: dates accept `YYYY-MM-DD` or quick replies, times accept `HH:MM` or quick replies, and voice clarification replies are rejected. The card and each question live in a single message that is edited in place as the draft evolves.
 
-The final card carries `Confirm`, `Edit`, and `Cancel`. These are placeholders for now: the bot only creates drafts, and no Google Calendar writes happen yet.
+`auto_write` is an eligibility result, not an action in this release. It means
+the request is a complete, grounded create with no remaining confirmation risk.
+Grounded named weekdays, explicit durations, and explicit end times are
+eligible. A named weekday means its next occurrence; on that weekday, it means
+seven days later. Locations, recurrence, corrections, multiple reminders, past
+starts, unknown operations, ungrounded fields, and DST ambiguity require review.
+
+The final card carries `Confirm`, `Edit`, and `Cancel`. These are placeholders for now: the bot creates drafts only, and no Google Calendar writes happen yet.
 
 Voice and text records are kept under `data/` with private permissions.
 
@@ -28,29 +35,38 @@ Voice and text records are kept under `data/` with private permissions.
 - [x] Build a fixed Romanian, Russian, and English ASR corpus and benchmark local models.
 - [x] Select an ASR model and return transcripts, including code-switched Romanian, Russian, and English.
 - [x] Benchmark extraction models and return a validated event schema.
+- [x] Replace Mistral extraction and language-specific parsing with one DeepSeek semantic extraction call.
 - [x] Extract operation, event type, title, date, time, duration, end time, location, reminders, and recurrence.
-- [x] Resolve dates, times, durations, defaults, reminders, and timezone rules with deterministic code.
-- [x] Report missing, ambiguous, and unsupported fields without guessing.
-- [x] Ask one focused question at a time and keep the rest of the draft while the user answers.
+- [x] Resolve dates, times, durations, defaults, reminders, recurrence, grounding, and timezone rules with deterministic code.
+- [x] Reject malformed or ungrounded model fields without guessing.
+- [x] Benchmark DeepSeek semantic behavior across three runs and re-resolve archived frozen outputs under each new resolver contract.
+- [x] Ask deterministic follow-up questions without another DeepSeek call: title text, `YYYY-MM-DD`, `HH:MM`, or quick replies.
+- [x] Reject voice replies while a clarification question is active.
 - [x] Update a single message in place as the draft evolves, for both typed and button answers.
 - [x] Offer quick replies for date and time, including an `All day` option.
+- [x] Store extraction model, contract hash, latency, original DeepSeek JSON, deterministic follow-up changes, and resolved result.
+- [x] Deploy production DeepSeek semantic extraction.
 
 ### Next
 
-- [ ] Wire `Confirm`, `Edit`, and `Cancel` to actions.
-- [ ] Prevent repeated button presses from creating duplicate events.
-- [ ] Connect Google Calendar and support `CALENDAR_WRITE_ENABLED` to disable writes during testing.
-- [ ] Create the confirmed event and return its details.
+- [ ] Choose Calendar identity and scope: one shared Calendar with a service account, or one Calendar connection per user through OAuth.
+- [ ] Add Google Calendar authentication, client, and normalized event payload behind `CALENDAR_WRITE_ENABLED=false`.
+- [ ] Persist a calendar-write record before each Google request: idempotency key, payload fingerprint, status, returned event ID, and error.
+- [ ] With `CALENDAR_WRITE_ENABLED=false`, generate and store proposed Calendar payloads without calling Google.
+- [ ] Review shadow records, then enable manual `Confirm` writes for review-required events.
+- [ ] Show created-event details and Calendar link for both confirmed and automatic creates.
+- [ ] Canary immediate creation for `auto_write=true` events; retain `CALENDAR_WRITE_ENABLED` as rollback.
+- [ ] Wire `Cancel` to close final review cards without mutation.
+- [ ] Read Calendar events and retain Google event references for later list and edit actions.
+- [ ] Wire `Edit` to revise one event field at a time before writing.
 - [ ] Search Google Maps with Moldova bias when an event includes a location.
 - [ ] Show formatted addresses and preview links, then ask the user to choose when several places match.
-- [ ] Create events automatically only when measured confidence is high enough.
-- [ ] Edit event fields one at a time.
 - [ ] List previous events and select one to edit.
 - [ ] Support general natural-language edits to existing events.
 
 ## Start
 
-1. Create configuration, then fill in `BOT_TOKEN` and `OWNER_ID`:
+1. Create configuration, then fill in `BOT_TOKEN`, `OWNER_ID`, `ELEVENLABS_API`, and `DEEPSEEK_API`:
 
    ```bash
    cp .env.example .env

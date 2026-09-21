@@ -1,0 +1,15 @@
+{
+  "frozen_at": "2026-09-21",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "request_options": {"thinking": {"type": "disabled"}},
+  "prompt_schema_hash": "286cf23e5a7f",
+  "resolver_sha256": "0aa434acd6181b75b582edbdb9df3bf42d95929e4b3eef56b44d8dbc5e810f37",
+  "development_cases": 80,
+  "development_recoverable_full_exact": "70/70",
+  "development_unsafe_auto_writes": 0,
+  "development_three_run_effect_stability": "80/80",
+  "development_three_run_strict_stability": "75/80",
+  "development_safe_non_writes": "10/10",
+  "replacement_holdout_cases": 24
+}

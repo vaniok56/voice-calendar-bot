@@ -1,8 +1,8 @@
 import unittest
 from datetime import date, datetime
 
-import semantic
-import semantic_benchmark
+from bot import semantic
+from benchmarks.llm import semantic_benchmark
 
 
 def empty(**updates):
@@ -46,8 +46,8 @@ class TestSemanticResolver(unittest.TestCase):
         result = semantic.resolve(raw, "sync Friday 4:15", self.REFERENCE)
         self.assertEqual(result["start"], "2026-09-25T04:15:00+03:00")
         self.assertEqual(result["duration_minutes"], 60)
-        self.assertIn("weekday", result["risks"])
-        self.assertFalse(result["auto_write"])
+        self.assertNotIn("weekday", result["risks"])
+        self.assertTrue(result["auto_write"])
 
     def test_bare_twelve_means_noon(self):
         raw = empty()
@@ -95,6 +95,13 @@ class TestSemanticResolver(unittest.TestCase):
                 result = semantic.resolve(raw, f"sync tomorrow {kind}", self.REFERENCE)
                 self.assertIn(expected, result["start"])
 
+    def test_unused_meridiem_may_be_null(self):
+        raw = empty()
+        raw["date"].update(kind="relative", source="tomorrow", offset_days=1)
+        raw["time"]["meridiem"] = None
+        result = semantic.resolve(raw, "sync tomorrow", self.REFERENCE)
+        self.assertNotIn("invalid_time", result["errors"])
+
     def test_correction_requires_confirmation(self):
         raw = empty(corrected=True)
         result = semantic.resolve(raw, "sync", self.REFERENCE)
@@ -134,9 +141,37 @@ class TestSemanticResolver(unittest.TestCase):
         )
         result = semantic.resolve(raw, "sync office 30 minutes before", self.REFERENCE)
         self.assertEqual(
-            result["risks"], ["location", "explicit_duration"]
+            result["risks"], ["location"]
         )
         self.assertFalse(result["auto_write"])
+        self.assertNotIn("explicit_duration", result["risks"])
+
+    def test_grounded_weekday_duration_and_end_time_auto_write(self):
+        raw = empty(
+            date={
+                "kind": "weekday", "source": "Friday", "year": None,
+                "month": None, "day": None, "weekday": 4, "offset_years": 0,
+                "offset_months": 0, "offset_weeks": 0, "offset_days": 0,
+            },
+            time={
+                "kind": "clock", "source": "15:00", "hour": 15, "minute": 0,
+                "meridiem": "24h", "offset_hours": 0,
+                "offset_minutes": 0, "approximate": False,
+            },
+            duration_minutes=30,
+            duration_source="30 minutes",
+            end_time={
+                "kind": "clock", "source": "16:00", "hour": 16, "minute": 0,
+                "meridiem": "24h", "offset_hours": 0,
+                "offset_minutes": 0, "approximate": False,
+            },
+        )
+        result = semantic.resolve(
+            raw, "sync Friday 15:00 to 16:00 for 30 minutes", self.REFERENCE
+        )
+        for risk in ("weekday", "explicit_duration", "end_time"):
+            self.assertNotIn(risk, result["risks"])
+        self.assertTrue(result["auto_write"])
 
     def test_one_grounded_reminder_can_auto_write(self):
         raw = empty(reminders=[{"source": "15 minutes before", "minutes": 15}])
@@ -306,6 +341,100 @@ class TestSemanticResolver(unittest.TestCase):
         )
         result = semantic.resolve(raw, "sync yearly at 9", self.REFERENCE)
         self.assertIn("recurrence_before_start", result["errors"])
+
+    def test_malformed_structures_never_auto_write(self):
+        cases = (
+            ("date", []),
+            ("time", "9"),
+            ("end_time", 9),
+            ("recurrence", []),
+            ("reminders", {}),
+            ("all_day", 1),
+            ("corrected", "yes"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                result = semantic.resolve(empty(**{field: value}), "sync", self.REFERENCE)
+                self.assertTrue(result["errors"])
+                self.assertFalse(result["auto_write"])
+
+    def test_malformed_nested_arrays_never_auto_write(self):
+        recurrence = {
+            "source": "weekly", "freq": "weekly", "interval": 1,
+            "weekdays": "Monday", "month_day": None, "month": None,
+            "position": None, "count": None, "until": None,
+        }
+        result = semantic.resolve(
+            empty(recurrence=recurrence, reminders=["tomorrow"]),
+            "sync weekly tomorrow",
+            self.REFERENCE,
+        )
+        self.assertIn("invalid_recurrence", result["errors"])
+        self.assertIn("invalid_reminder", result["errors"])
+        self.assertFalse(result["auto_write"])
+
+    def test_duration_requires_grounded_source(self):
+        result = semantic.resolve(
+            empty(duration_minutes=30, duration_source=None), "sync", self.REFERENCE
+        )
+        self.assertIn("ungrounded_duration", result["risks"])
+        self.assertFalse(result["auto_write"])
+
+    def test_monthly_day_uses_upcoming_current_month(self):
+        recurrence = {
+            "source": "monthly on 25", "freq": "monthly", "interval": 1,
+            "weekdays": [], "month_day": 25, "month": None,
+            "position": None, "count": None, "until": None,
+        }
+        result = semantic.resolve(
+            empty(recurrence=recurrence), "sync monthly on 25", self.REFERENCE
+        )
+        self.assertEqual(result["date"], "2026-09-25")
+
+    def test_monthly_ordinal_uses_upcoming_current_month(self):
+        recurrence = {
+            "source": "fourth Friday", "freq": "monthly", "interval": 1,
+            "weekdays": [4], "month_day": None, "month": None,
+            "position": 4, "count": None, "until": None,
+        }
+        result = semantic.resolve(
+            empty(recurrence=recurrence), "sync fourth Friday", self.REFERENCE
+        )
+        self.assertEqual(result["date"], "2026-09-25")
+
+    def test_monthly_passed_occurrence_uses_next_month(self):
+        recurrence = {
+            "source": "monthly on 10", "freq": "monthly", "interval": 1,
+            "weekdays": [], "month_day": 10, "month": None,
+            "position": None, "count": None, "until": None,
+        }
+        result = semantic.resolve(
+            empty(recurrence=recurrence), "sync monthly on 10", self.REFERENCE
+        )
+        self.assertEqual(result["date"], "2026-10-10")
+
+    def test_yearly_uses_current_or_next_year(self):
+        for month, day, expected in ((12, 1, "2026-12-01"), (1, 1, "2027-01-01")):
+            with self.subTest(month=month):
+                recurrence = {
+                    "source": "yearly", "freq": "yearly", "interval": 1,
+                    "weekdays": [], "month_day": day, "month": month,
+                    "position": None, "count": None, "until": None,
+                }
+                result = semantic.resolve(empty(recurrence=recurrence), "sync yearly", self.REFERENCE)
+                self.assertEqual(result["date"], expected)
+
+    def test_yearly_leap_day_finds_next_valid_occurrence(self):
+        recurrence = {
+            "source": "yearly", "freq": "yearly", "interval": 1,
+            "weekdays": [], "month_day": 29, "month": 2,
+            "position": None, "count": None, "until": None,
+        }
+        result = semantic.resolve(empty(recurrence=recurrence), "sync yearly", self.REFERENCE)
+        self.assertEqual(result["date"], "2028-02-29")
+
+    def test_contract_hash(self):
+        self.assertEqual(len(semantic.contract_hash()), 12)
 
 
 if __name__ == "__main__":

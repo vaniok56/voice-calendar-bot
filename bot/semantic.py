@@ -1,9 +1,11 @@
-"""Semantic LLM contract and language-free calendar resolver prototype."""
+"""Semantic LLM contract and language-free calendar resolver."""
 
 import calendar
+import hashlib
 import re
 import unicodedata
 from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ZONE = ZoneInfo("Europe/Chisinau")
@@ -149,11 +151,16 @@ Each reminders item: source, minutes. title, location, and duration_source are e
 
 
 def build_messages(text: str, reference: datetime) -> list[dict]:
-    context = reference.astimezone(ZONE).isoformat()
+    context = reference.astimezone(ZONE).isoformat() if reference.tzinfo else reference.replace(tzinfo=ZONE).isoformat()
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Reference local datetime: {context}\nMessage: {text}"},
     ]
+
+
+def contract_hash() -> str:
+    """Hash production contract and resolver code for record provenance."""
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
 
 
 def _normalize(text: str) -> str:
@@ -167,6 +174,100 @@ def _grounded(value: str | None, source: str) -> bool:
     if value is None:
         return True
     return isinstance(value, str) and isinstance(source, str) and _normalize(value) in _normalize(source)
+
+
+def _none_date() -> dict:
+    return {
+        "kind": "none", "source": None, "year": None, "month": None,
+        "day": None, "weekday": None, "offset_years": 0,
+        "offset_months": 0, "offset_weeks": 0, "offset_days": 0,
+    }
+
+
+def _none_time() -> dict:
+    return {
+        "kind": "none", "source": None, "hour": None, "minute": None,
+        "meridiem": "none", "offset_hours": 0, "offset_minutes": 0,
+        "approximate": False,
+    }
+
+
+def _is_int(value, minimum: int | None = None, maximum: int | None = None) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and (minimum is None or value >= minimum)
+        and (maximum is None or value <= maximum)
+    )
+
+
+def _valid_optional_int(value, minimum: int, maximum: int) -> bool:
+    return value is None or _is_int(value, minimum, maximum)
+
+
+def _valid_date_spec(spec: dict) -> bool:
+    return (
+        spec.get("kind") in {"none", "absolute", "relative", "weekday"}
+        and (spec.get("source") is None or isinstance(spec.get("source"), str))
+        and _valid_optional_int(spec.get("year"), 1, 9999)
+        and _valid_optional_int(spec.get("month"), 1, 12)
+        and _valid_optional_int(spec.get("day"), 1, 31)
+        and _valid_optional_int(spec.get("weekday"), 0, 6)
+        and all(
+            _is_int(spec.get(field, 0), minimum, maximum)
+            for field, minimum, maximum in (
+                ("offset_years", -100, 100),
+                ("offset_months", -1200, 1200),
+                ("offset_weeks", -5200, 5200),
+                ("offset_days", -36500, 36500),
+            )
+        )
+    )
+
+
+def _valid_time_spec(spec: dict) -> bool:
+    kind = spec.get("kind")
+    meridiem = spec.get("meridiem")
+    return (
+        kind in {"none", "clock", "noon", "midnight", "relative"}
+        and (spec.get("source") is None or isinstance(spec.get("source"), str))
+        and _valid_optional_int(spec.get("hour"), 0, 23)
+        and _valid_optional_int(spec.get("minute"), 0, 59)
+        and (
+            meridiem in {"none", "am", "pm", "24h", "unspecified"}
+            or (meridiem is None and kind != "clock")
+        )
+        and _is_int(spec.get("offset_hours", 0), -876000, 876000)
+        and _is_int(spec.get("offset_minutes", 0), -52560000, 52560000)
+        and isinstance(spec.get("approximate", False), bool)
+    )
+
+
+def _object(raw: dict, field: str, errors: list[str], default: dict) -> dict:
+    value = raw.get(field)
+    if value is None:
+        return default
+    if not isinstance(value, dict):
+        errors.append(f"invalid_{field}")
+        return default
+    return value
+
+
+def _valid_recurrence(value: dict) -> bool:
+    weekdays = value.get("weekdays", [])
+    return (
+        isinstance(value.get("source"), str)
+        and value.get("freq") in {"daily", "weekly", "monthly", "yearly"}
+        and _is_int(value.get("interval", 1), 1, 1000)
+        and isinstance(weekdays, list)
+        and all(_is_int(weekday, 0, 6) for weekday in weekdays)
+        and _valid_optional_int(value.get("month_day"), 1, 31)
+        and _valid_optional_int(value.get("month"), 1, 12)
+        and _valid_optional_int(value.get("position"), -5, 5)
+        and value.get("position") != 0
+        and (value.get("count") is None or _is_int(value.get("count"), 1))
+        and (value.get("until") is None or isinstance(value.get("until"), str))
+    )
 
 
 def _add_months(value: date, months: int) -> date:
@@ -273,10 +374,25 @@ def _nth_weekday(year: int, month: int, weekday: int, position: int) -> date | N
     return date(year, month, day) if 1 <= day <= last_day else None
 
 
+def _recurrence_candidate(
+    year: int, month: int, recurrence: dict, default_day: int
+) -> date | None:
+    weekdays, position = recurrence.get("weekdays") or [], recurrence.get("position")
+    if position is not None:
+        if len(weekdays) != 1:
+            return None
+        return _nth_weekday(year, month, weekdays[0], position)
+    day = recurrence.get("month_day") or default_day
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
 def _first_recurrence_date(recurrence: dict, reference: date, errors: list[str]) -> date | None:
     freq = recurrence.get("freq")
     interval = recurrence.get("interval", 1)
-    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 1:
+    if not _is_int(interval, 1):
         errors.append("invalid_recurrence")
         return None
     if freq == "daily":
@@ -289,24 +405,22 @@ def _first_recurrence_date(recurrence: dict, reference: date, errors: list[str])
         deltas = [(weekday - reference.weekday()) % 7 or 7 for weekday in weekdays]
         return reference + timedelta(days=min(deltas))
     if freq in {"monthly", "yearly"}:
-        cursor = _add_months(reference.replace(day=1), interval) if freq == "monthly" else None
-        year = cursor.year if cursor else reference.year + interval
-        month = cursor.month if cursor else recurrence.get("month") or reference.month
-        weekdays, position = recurrence.get("weekdays") or [], recurrence.get("position")
-        if position is not None:
-            if len(weekdays) != 1 or not isinstance(position, int) or isinstance(position, bool):
-                errors.append("invalid_recurrence")
-                return None
-            result = _nth_weekday(year, month, weekdays[0], position)
-            if result is None:
-                errors.append("invalid_recurrence")
-            return result
-        day = recurrence.get("month_day") or reference.day
-        try:
-            return date(year, month, day)
-        except ValueError:
-            errors.append("invalid_recurrence")
-            return None
+        cursor = reference.replace(day=1)
+        if freq == "yearly":
+            cursor = cursor.replace(month=recurrence.get("month") or reference.month)
+        for _ in range(4800):
+            result = _recurrence_candidate(
+                cursor.year, cursor.month, recurrence, reference.day
+            )
+            if result is not None and result >= reference:
+                return result
+            cursor = (
+                _add_months(cursor, interval)
+                if freq == "monthly"
+                else cursor.replace(year=cursor.year + interval)
+            )
+        errors.append("invalid_recurrence")
+        return None
     errors.append("invalid_recurrence")
     return None
 
@@ -327,6 +441,55 @@ def resolve(raw: dict, transcript: str, reference: datetime | date | None = None
         errors.append("invalid_payload")
     else:
         raw = raw.copy()
+
+    date_spec = _object(raw, "date", errors, _none_date())
+    if date_spec.get("kind") != "none" and not _grounded(date_spec.get("source"), transcript):
+        risks.append("ungrounded_date")
+    if not _valid_date_spec(date_spec):
+        errors.append("invalid_date")
+        date_spec = _none_date()
+    time_spec = _object(raw, "time", errors, _none_time())
+    if time_spec.get("kind") != "none" and not _grounded(time_spec.get("source"), transcript):
+        risks.append("ungrounded_time")
+    if not _valid_time_spec(time_spec):
+        errors.append("invalid_time")
+        time_spec = _none_time()
+    end_time_spec = _object(raw, "end_time", errors, _none_time())
+    if end_time_spec.get("kind") != "none" and not _grounded(end_time_spec.get("source"), transcript):
+        risks.append("ungrounded_end_time")
+    if not _valid_time_spec(end_time_spec):
+        errors.append("invalid_end_time")
+        end_time_spec = _none_time()
+
+    recurrence = raw.get("recurrence")
+    if recurrence is not None and (
+        not isinstance(recurrence, dict) or not _valid_recurrence(recurrence)
+    ):
+        errors.append("invalid_recurrence")
+        recurrence = None
+
+    reminders = raw.get("reminders")
+    if reminders is None:
+        reminders = []
+    elif not isinstance(reminders, list):
+        errors.append("invalid_reminders")
+        reminders = []
+    valid_reminders = []
+    for item in reminders:
+        if not (
+            isinstance(item, dict)
+            and isinstance(item.get("source"), str)
+            and _is_int(item.get("minutes"), 1)
+        ):
+            errors.append("invalid_reminder")
+        else:
+            valid_reminders.append(item)
+    reminders = valid_reminders
+
+    for field in ("all_day", "corrected"):
+        if field in raw and not isinstance(raw[field], bool):
+            errors.append(f"invalid_{field}")
+            raw[field] = False
     for field in ("title", "location", "duration_source"):
         if raw.get(field) is not None and not isinstance(raw[field], str):
             raw[field] = None
@@ -341,34 +504,26 @@ def resolve(raw: dict, transcript: str, reference: datetime | date | None = None
     for field in ("title", "location", "duration_source"):
         if not _grounded(raw.get(field), transcript):
             risks.append(f"ungrounded_{field}")
-    for field in ("date", "time", "end_time"):
-        spec = raw.get(field) or {}
+    for field, spec in (
+        ("date", date_spec), ("time", time_spec), ("end_time", end_time_spec)
+    ):
         if spec.get("kind") != "none" and not _grounded(spec.get("source"), transcript):
             risks.append(f"ungrounded_{field}")
-    recurrence = raw.get("recurrence")
     if recurrence and not _grounded(recurrence.get("source"), transcript):
         risks.append("ungrounded_recurrence")
-    reminders = raw.get("reminders") or []
-    if any(not _grounded(item.get("source"), transcript) for item in reminders if isinstance(item, dict)):
+    if any(not _grounded(item.get("source"), transcript) for item in reminders):
         risks.append("ungrounded_reminder")
     if raw.get("corrected"):
         risks.append("self_correction")
-    if raw.get("date", {}).get("kind") == "weekday":
-        risks.append("weekday")
-    # Complex event details need user review until holdout proves them safe.
+    # Grounded, deterministic fields (weekday, explicit duration, end time) auto-write.
+    # These keep needing user review because they stay ambiguous or unnormalized.
     if raw.get("location"):
         risks.append("location")
-    if raw.get("duration_source"):
-        risks.append("explicit_duration")
-    if raw.get("end_time") and raw["end_time"].get("kind") != "none":
-        risks.append("end_time")
     if recurrence:
         risks.append("recurrence")
     if len(reminders) > 1:
         risks.append("multiple_reminders")
 
-    date_spec = raw.get("date") or {"kind": "none"}
-    time_spec = raw.get("time") or {"kind": "none"}
     day = _resolve_date(date_spec, reference_dt.date(), errors)
     clock = _resolve_time(time_spec, errors)
     if time_spec.get("kind") == "relative":
@@ -407,7 +562,12 @@ def resolve(raw: dict, transcript: str, reference: datetime | date | None = None
     if duration is not None and (not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0):
         errors.append("invalid_duration")
         duration = None
-    end_clock = _resolve_time(raw.get("end_time") or {"kind": "none"}, errors)
+    elif duration is not None and (
+        not isinstance(raw.get("duration_source"), str)
+        or not _grounded(raw["duration_source"], transcript)
+    ):
+        risks.append("ungrounded_duration")
+    end_clock = _resolve_time(end_time_spec, errors)
     if end_clock and start:
         end = _local_datetime(day, end_clock, risks)
         if end <= start:
@@ -421,13 +581,7 @@ def resolve(raw: dict, transcript: str, reference: datetime | date | None = None
         else:
             duration = DEFAULT_DURATION.get(event_type)
 
-    reminder_minutes = []
-    for item in reminders:
-        minutes = item.get("minutes") if isinstance(item, dict) else None
-        if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
-            errors.append("invalid_reminder")
-        else:
-            reminder_minutes.append(minutes)
+    reminder_minutes = [item["minutes"] for item in reminders]
 
     title = raw.get("title")
     if operation == "create" and not title:

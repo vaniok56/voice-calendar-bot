@@ -37,7 +37,7 @@ Resolver intentionally contains no language dictionaries, translated keywords, w
 - Self-correction requires confirmation.
 - Missing title falls back to grounded location, then deterministic event type.
 - One grounded reminder may auto-write. Multiple reminders require confirmation.
-- Named weekday, location, explicit duration/end, recurrence, and correction require confirmation during canary.
+- Location, recurrence, and correction require confirmation. Grounded named weekday, explicit duration, and explicit end time auto-write.
 - Birthday is all-day.
 - Timed trip without explicit duration ends at next local midnight.
 - Default durations: meeting/other 60m, appointment/call/task 30m, class 90m, exam 120m, reminder 15m.
@@ -87,6 +87,7 @@ This snapshot preserves the contract exactly as holdout-tested. Review found iss
 - Monthly/yearly recurrence can skip an upcoming occurrence in the current month/year.
 - Malformed nested date/time/recurrence objects can raise instead of returning a structured rejection.
 - A model-provided duration without `duration_source` is not independently grounding-gated.
+- A code-switched self-correction can be auto-accepted when the model omits `self_correction` and the date is a named weekday (see `former-holdout-v3-adjudication.md`). Out of scope for supported input.
 - Title/location benchmark matching accepts normalized substring containment, not strict equality.
 - Private recordings and raw API outputs are intentionally not committed, so public checkout cannot fully reproduce API reports.
 

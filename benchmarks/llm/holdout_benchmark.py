@@ -11,11 +11,14 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import cloud_runner
-import semantic
-from semantic_benchmark import _same_resolved, differences, format_eta, same_effect
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks.llm import cloud_runner
+from bot import semantic
+from benchmarks.llm.semantic_benchmark import _same_resolved, differences, format_eta, same_effect
+
 MANIFEST = Path(__file__).with_name("replacement-holdout-manifest.jsonl")
 GOLD = Path(__file__).with_name("replacement-holdout-gold.jsonl")
 FROZEN = Path(__file__).with_name("frozen-contract.json")
@@ -39,6 +42,15 @@ def contract_hash() -> str:
     return hashlib.sha256(
         (
             PROVIDER + MODEL + semantic.SYSTEM_PROMPT + json.dumps(semantic.SCHEMA, sort_keys=True)
+            + json.dumps(cloud_runner.PROVIDERS[PROVIDER].get("request_options", {}), sort_keys=True)
+        ).encode()
+    ).hexdigest()[:12]
+
+
+def v2_contract_hash() -> str:
+    return hashlib.sha256(
+        (
+            PROVIDER + MODEL + semantic.contract_hash()
             + json.dumps(cloud_runner.PROVIDERS[PROVIDER].get("request_options", {}), sort_keys=True)
         ).encode()
     ).hexdigest()[:12]
@@ -194,9 +206,15 @@ def report(cases: list[dict], prompt_hash: str) -> None:
         (effect_stable if effect_matches else effect_unstable).append(case["id"])
         (strict_stable if strict_matches else strict_unstable).append(case["id"])
     stability_total = len(effect_stable) + len(effect_unstable)
+    if "replay" in RESULTS.stem:
+        title = "Archived holdout replay"
+    elif "development" in RESULTS.stem:
+        title = "Former holdout development"
+    else:
+        title = "Frozen holdout"
     lines = [
-        f"# {'Former holdout development' if RESULTS.stem.endswith('development') else 'Frozen holdout'} benchmark", "",
-        f"Model: `{MODEL}`. Cases: {len(rows)}/{len(cases)}. Prompt/schema hash: `{prompt_hash}`.", "",
+        f"# {title} benchmark", "",
+        f"Model: `{MODEL}`. Cases: {len(rows)}/{len(cases)}. Contract hash: `{prompt_hash}`.", "",
         f"- API errors: {len(rows) - len(ok)}",
         f"- Recoverable critical exact: {len(recoverable_critical)}/{len(recoverable)}",
         f"- Recoverable full exact: {len(recoverable_full)}/{len(recoverable)}",
@@ -232,25 +250,63 @@ def report(cases: list[dict], prompt_hash: str) -> None:
     RESULTS.with_suffix(".md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def replay_v2(cases: list[dict], prompt_hash: str, source: Path) -> None:
+    by_id = {case["id"]: case for case in cases}
+    rows = []
+    for row in (_rows(source) if source.exists() else []):
+        if row.get("status") != "ok" or row["id"] not in by_id:
+            continue
+        case = by_id[row["id"]]
+        resolved = semantic.resolve(row["raw"], case["text"], case["reference"])
+        rows.append({
+            **row,
+            "prompt_hash": prompt_hash,
+            "resolved": resolved,
+            "recoverable_differences": (
+                [] if case.get("safety_only") or case.get("confirmation_only")
+                else differences(case["recoverable"], resolved)
+            ),
+            "intended_differences": differences(case["intended"], resolved),
+        })
+    WORK.mkdir(mode=0o700, parents=True, exist_ok=True)
+    RESULTS.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--development", action="store_true", help="rerun exposed holdout as development data")
     parser.add_argument("--retry", action="store_true", help="rerun all development cases for stability")
+    parser.add_argument("--v2-replay", action="store_true", help="re-resolve archived raw outputs without API calls")
     args = parser.parse_args()
     if args.retry and not args.development:
         parser.error("--retry requires --development")
+    if args.v2_replay and (args.retry or args.report_only):
+        parser.error("--v2-replay cannot be combined with --retry or --report-only")
     global EXPECTED_CASES, GOLD, MANIFEST, RECORDS, RESULTS
     if args.development:
         MANIFEST = Path(__file__).with_name("holdout-manifest.jsonl")
         GOLD = Path(__file__).with_name("holdout-gold.jsonl")
         RECORDS = ROOT / "data" / "voice-holdout-2026-09-21" / "raw"
-        RESULTS = WORK / "deepseek-flash-former-holdout-development.jsonl"
+        RESULTS = WORK / "deepseek-flash-former-holdout-development-v2.jsonl"
         EXPECTED_CASES = 40
     cloud_runner.load_environment(ROOT / ".env")
     cloud_runner.contract.SCHEMA = semantic.SCHEMA
-    prompt_hash = contract_hash() if args.development else verify_freeze()
     cases = load_cases()
+    if args.v2_replay:
+        source = RESULTS
+        if args.development:
+            RESULTS = WORK / "deepseek-flash-former-holdout-development-v3-replay.jsonl"
+        else:
+            RESULTS = WORK / "deepseek-flash-replacement-holdout-v3-replay.jsonl"
+        prompt_hash = v2_contract_hash()
+        replay_v2(cases, prompt_hash, source)
+        report(cases, prompt_hash)
+        return
+    prompt_hash = v2_contract_hash() if args.development else verify_freeze()
     if not args.report_only:
         run_once(cases, prompt_hash, args.development, args.retry)
     report(cases, prompt_hash)

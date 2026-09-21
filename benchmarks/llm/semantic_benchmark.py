@@ -11,10 +11,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import cloud_runner
-import semantic
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from benchmarks.llm import cloud_runner
+from bot import semantic
+
 WORK = ROOT / "data" / "llm-semantic-benchmark"
 RESULTS = WORK / "mistral-large-semantic.jsonl"
 SCRIBE = ROOT / "data" / "asr-benchmark" / "results" / "elevenlabs-scribe-v2.jsonl"
@@ -162,6 +165,15 @@ def format_eta(seconds: float) -> str:
     return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
 
 
+def contract_hash() -> str:
+    return hashlib.sha256(
+        (
+            PROVIDER + MODEL + semantic.contract_hash()
+            + json.dumps(cloud_runner.PROVIDERS[PROVIDER].get("request_options", {}), sort_keys=True)
+        ).encode()
+    ).hexdigest()[:12]
+
+
 def run(cases: list[dict], retry: bool, prompt_hash: str) -> None:
     WORK.mkdir(mode=0o700, parents=True, exist_ok=True)
     done = set() if retry else completed_ids(prompt_hash)
@@ -267,7 +279,7 @@ def report(cases: list[dict], prompt_hash: str) -> None:
     lines = [
         "# Semantic benchmark", "",
         f"Model: `{MODEL}`. Reference: `{REFERENCE.isoformat()}`. Cases: {len(rows)}/{len(cases)}.",
-        f"Prompt/schema hash: `{prompt_hash}`.", "",
+        f"Contract hash: `{prompt_hash}`.", "",
         f"- API errors: {len(rows) - len(ok)}",
         f"- Critical exact: {len(critical)}/{len(normal)}",
         f"- Full exact: {len(full)}/{len(normal)}",
@@ -299,26 +311,55 @@ def report(cases: list[dict], prompt_hash: str) -> None:
     RESULTS.with_suffix(".md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def replay(cases: list[dict], prompt_hash: str, source: Path) -> None:
+    """Re-resolve stored raw outputs under the current resolver, no API calls."""
+    by_id = {case["id"]: case for case in cases}
+    rows = []
+    for row in (_rows(source) if source.exists() else []):
+        if row.get("status") != "ok" or row["id"] not in by_id:
+            continue
+        case = by_id[row["id"]]
+        resolved = semantic.resolve(row["raw"], case["text"], REFERENCE)
+        rows.append({
+            **row,
+            "prompt_hash": prompt_hash,
+            "resolved": resolved,
+            "differences": [] if case["safety_only"] else differences(case["expected"], resolved),
+        })
+    WORK.mkdir(mode=0o700, parents=True, exist_ok=True)
+    RESULTS.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _rows(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--retry", action="store_true")
     parser.add_argument("--report-only", action="store_true")
+    parser.add_argument("--replay", action="store_true", help="re-resolve stored deepseek raw outputs")
     parser.add_argument("--provider", choices=("mistral", "deepseek"), default="mistral")
     args = parser.parse_args()
     global PROVIDER, MODEL, RESULTS
     PROVIDER = args.provider
     if PROVIDER == "deepseek":
         MODEL = "deepseek-flash"
-        RESULTS = WORK / "deepseek-flash-semantic.jsonl"
+        RESULTS = WORK / "deepseek-flash-semantic-v2.jsonl"
     cloud_runner.load_environment(ROOT / ".env")
     cloud_runner.contract.SCHEMA = semantic.SCHEMA
-    prompt_hash = hashlib.sha256(
-        (
-            PROVIDER + MODEL + semantic.SYSTEM_PROMPT + json.dumps(semantic.SCHEMA, sort_keys=True)
-            + json.dumps(cloud_runner.PROVIDERS[PROVIDER].get("request_options", {}), sort_keys=True)
-        ).encode()
-    ).hexdigest()[:12]
     cases = load_cases()
+    if args.replay:
+        source = RESULTS
+        RESULTS = WORK / "deepseek-flash-semantic-v3-replay.jsonl"
+        prompt_hash = contract_hash()
+        replay(cases, prompt_hash, source)
+        report(cases, prompt_hash)
+        return
+    prompt_hash = contract_hash()
     if not args.report_only:
         run(cases, args.retry, prompt_hash)
     report(cases, prompt_hash)

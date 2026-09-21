@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
-import contract
+from benchmarks.llm import contract
 
 _RETRYABLE = {429, 500, 502, 503, 504}
 

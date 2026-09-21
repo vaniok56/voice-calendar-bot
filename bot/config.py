@@ -11,7 +11,7 @@ class Config:
     owner_id: int
     elevenlabs_api_key: str
     elevenlabs_model: str
-    mistral_api_key: str
+    deepseek_api_key: str
     extraction_model: str
     extraction_timeout: int
     data_dir: Path
@@ -50,10 +50,10 @@ def load_config() -> Config:
     if not elevenlabs_model:
         raise RuntimeError("ELEVENLABS_MODEL must not be empty")
 
-    mistral_key = os.environ.get("MISTRAL_API", "").strip()
-    if not mistral_key:
-        raise RuntimeError("MISTRAL_API must be set in .env")
-    extraction_model = os.environ.get("EXTRACTION_MODEL", "mistral-large-latest").strip()
+    deepseek_key = os.environ.get("DEEPSEEK_API", "").strip()
+    if not deepseek_key:
+        raise RuntimeError("DEEPSEEK_API must be set in .env")
+    extraction_model = os.environ.get("EXTRACTION_MODEL", "deepseek-flash").strip()
     if not extraction_model:
         raise RuntimeError("EXTRACTION_MODEL must not be empty")
     extraction_timeout = _int_env("EXTRACTION_TIMEOUT", "60")
@@ -81,7 +81,7 @@ def load_config() -> Config:
         owner_id=owner_id,
         elevenlabs_api_key=elevenlabs_key,
         elevenlabs_model=elevenlabs_model,
-        mistral_api_key=mistral_key,
+        deepseek_api_key=deepseek_key,
         extraction_model=extraction_model,
         extraction_timeout=extraction_timeout,
         data_dir=Path(os.environ.get("DATA_DIR", "data")).expanduser().resolve(),

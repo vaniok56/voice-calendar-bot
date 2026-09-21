@@ -3,143 +3,155 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import date
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiogram.exceptions import TelegramBadRequest
 
-from .asr import (
-    ASRServiceError,
-    TranscriptionResponse,
-    format_duration,
-    transcribe_voice,
-)
-from .config import Config, load_config
+from . import semantic
+from .asr import ASRServiceError, TranscriptionResponse, format_duration, transcribe_voice
+from .config import load_config
 from .drafts import Draft, apply_answer, next_field
-from .extraction import Extraction, ExtractionServiceError, _parse_content, coerce, extract_event
+from .extraction import (
+    Extraction,
+    ExtractionServiceError,
+    _parse_content,
+    _request_body,
+    extract_event,
+)
 from .handlers.voice import (
+    _answer_draft,
     _question_keyboard,
     _question_text,
     format_resolved,
+    handle_text,
+    handle_voice,
     reply_event,
     run_extraction,
 )
-from .resolver import parse_date, resolve
+
+
+REFERENCE = datetime(2026, 9, 18, 12, 0, tzinfo=semantic.ZONE)
+
+
+def semantic_raw(**updates):
+    value = {
+        "operation": "create",
+        "event_type": "meeting",
+        "title": "sync",
+        "date": semantic._none_date(),
+        "time": semantic._none_time(),
+        "all_day": False,
+        "duration_minutes": None,
+        "duration_source": None,
+        "end_time": semantic._none_time(),
+        "location": None,
+        "recurrence": None,
+        "reminders": [],
+        "corrected": False,
+    }
+    value.update(updates)
+    return value
+
+
+def complete_raw():
+    raw = semantic_raw()
+    raw["date"].update(kind="relative", source="tomorrow", offset_days=1)
+    raw["time"].update(
+        kind="clock", source="09:00", hour=9, minute=0, meridiem="24h"
+    )
+    return raw
 
 
 class TestASR(unittest.TestCase):
-
     def test_format_duration(self):
         self.assertEqual(format_duration(0), "0:00 (0s)")
-        self.assertEqual(format_duration(14), "0:14 (14s)")
         self.assertEqual(format_duration(65), "1:05 (65s)")
-        self.assertEqual(format_duration(3600), "60:00 (3600s)")
 
     @patch("bot.asr.urlopen")
     def test_transcribe_voice_success(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = b'{"text": "Meeting at 3 PM", "language_code": "eng"}'
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        with tempfile.NamedTemporaryFile(suffix=".ogg") as tmp:
-            tmp.write(b"dummy audio data")
-            tmp.flush()
-            import asyncio
-            result = asyncio.run(transcribe_voice(Path(tmp.name), api_key="dummy_key"))
-
+        response = MagicMock()
+        response.read.return_value = b'{"text": "Meeting at 3 PM", "language_code": "eng"}'
+        mock_urlopen.return_value.__enter__.return_value = response
+        with tempfile.NamedTemporaryFile(suffix=".ogg") as audio:
+            audio.write(b"dummy audio data")
+            audio.flush()
+            result = asyncio.run(transcribe_voice(Path(audio.name), api_key="dummy"))
         self.assertIsInstance(result, TranscriptionResponse)
         self.assertEqual(result.text, "Meeting at 3 PM")
-        self.assertEqual(result.language_code, "eng")
-        self.assertGreaterEqual(result.wait_time_seconds, 0)
 
     @patch("bot.asr.urlopen")
-    def test_transcribe_voice_empty_text_error(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = b'{"text": "", "language_code": "eng"}'
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        with tempfile.NamedTemporaryFile(suffix=".ogg") as tmp:
-            tmp.write(b"dummy audio data")
-            tmp.flush()
-            import asyncio
-            with self.assertRaises(ASRServiceError) as ctx:
-                asyncio.run(transcribe_voice(Path(tmp.name), api_key="dummy_key"))
-            self.assertIn("empty transcript", str(ctx.exception))
+    def test_transcribe_voice_rejects_empty_text(self, mock_urlopen):
+        response = MagicMock()
+        response.read.return_value = b'{"text": "", "language_code": "eng"}'
+        mock_urlopen.return_value.__enter__.return_value = response
+        with tempfile.NamedTemporaryFile(suffix=".ogg") as audio:
+            audio.write(b"dummy audio data")
+            audio.flush()
+            with self.assertRaises(ASRServiceError):
+                asyncio.run(transcribe_voice(Path(audio.name), api_key="dummy"))
 
 
 class TestConfig(unittest.TestCase):
-    @patch.dict(os.environ, {
-        "BOT_TOKEN": "123:ABC",
-        "OWNER_ID": "999",
-        "ELEVENLABS_API": "test_eleven_key",
-        "MISTRAL_API": "test_mistral_key",
-    }, clear=True)
-    def test_load_config_success(self):
-        cfg = load_config()
-        self.assertEqual(cfg.bot_token, "123:ABC")
-        self.assertEqual(cfg.owner_id, 999)
-        self.assertEqual(cfg.elevenlabs_api_key, "test_eleven_key")
-        self.assertEqual(cfg.mistral_api_key, "test_mistral_key")
-        self.assertEqual(cfg.extraction_model, "mistral-large-latest")
-        self.assertEqual(cfg.extraction_timeout, 60)
-
     @patch("bot.config.load_dotenv")
     @patch.dict(os.environ, {
         "BOT_TOKEN": "123:ABC",
         "OWNER_ID": "999",
-        "ELEVENLABS_API": "test_eleven_key",
+        "ELEVENLABS_API": "eleven",
+        "DEEPSEEK_API": "deepseek",
     }, clear=True)
-    def test_load_config_requires_mistral(self, _mock_dotenv):
-        with self.assertRaises(RuntimeError):
+    def test_load_config_success(self, _mock_dotenv):
+        config = load_config()
+        self.assertEqual(config.deepseek_api_key, "deepseek")
+        self.assertEqual(config.extraction_model, "deepseek-flash")
+        self.assertEqual(config.extraction_timeout, 60)
+
+    @patch("bot.config.load_dotenv")
+    @patch.dict(os.environ, {
+        "BOT_TOKEN": "123:ABC", "OWNER_ID": "999", "ELEVENLABS_API": "eleven",
+    }, clear=True)
+    def test_load_config_requires_deepseek(self, _mock_dotenv):
+        with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API"):
             load_config()
 
     @patch("bot.config.load_dotenv")
     @patch.dict(os.environ, {
-        "BOT_TOKEN": "123:ABC",
-        "OWNER_ID": "999",
-        "ELEVENLABS_API": "test_eleven_key",
-        "MISTRAL_API": "test_mistral_key",
-        "EXTRACTION_TIMEOUT": "abc",
+        "BOT_TOKEN": "123:ABC", "OWNER_ID": "999", "ELEVENLABS_API": "eleven",
+        "DEEPSEEK_API": "deepseek", "EXTRACTION_TIMEOUT": "abc",
     }, clear=True)
-    def test_load_config_bad_int(self, _mock_dotenv):
-        with self.assertRaises(RuntimeError):
+    def test_load_config_bad_timeout(self, _mock_dotenv):
+        with self.assertRaisesRegex(RuntimeError, "EXTRACTION_TIMEOUT"):
             load_config()
 
 
 class TestExtraction(unittest.TestCase):
-    def test_parse_content_fenced(self):
-        raw = '```json\n{"operation": "create"}\n```'
-        self.assertEqual(_parse_content(raw), {"operation": "create"})
+    def test_request_body_uses_deepseek_contract(self):
+        messages = [{"role": "system", "content": "contract"}]
+        body = _request_body("deepseek-flash", messages)
+        self.assertEqual(body["messages"], messages)
+        self.assertEqual(body["response_format"], {"type": "json_object"})
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+        self.assertEqual(body["max_tokens"], 2048)
 
-    def test_parse_content_invalid(self):
+    def test_parse_content(self):
+        self.assertEqual(_parse_content('```json\n{"operation": "create"}\n```'), {"operation": "create"})
         with self.assertRaises(ExtractionServiceError):
             _parse_content("not json")
-        with self.assertRaises(ExtractionServiceError):
-            _parse_content("[1, 2, 3]")
-
-    def test_coerce_out_of_enum(self):
-        coerced = coerce({"operation": "remind", "event_type": "party",
-                          "reminder_texts": "oops"})
-        self.assertEqual(coerced["operation"], "create")
-        self.assertEqual(coerced["event_type"], "other")
-        self.assertEqual(coerced["reminder_texts"], [])
 
     @patch("bot.extraction.urllib.request.urlopen")
     def test_extract_event_success(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps({
-            "choices": [{"message": {"content": '{"operation": "create", "event_type": "class"}'}}]
+        response = MagicMock()
+        response.read.return_value = json.dumps({
+            "choices": [{"message": {"content": '{"operation": "create"}'}}]
         }).encode()
-        mock_urlopen.return_value.__enter__.return_value = mock_response
-
-        import asyncio
-        result = asyncio.run(extract_event("lab maine la 10", api_key="k", model="m"))
-        self.assertEqual(result.raw["operation"], "create")
-        self.assertGreaterEqual(result.wait_time_seconds, 0)
+        mock_urlopen.return_value.__enter__.return_value = response
+        result = asyncio.run(extract_event([], api_key="key", model="model"))
+        self.assertEqual(result.raw, {"operation": "create"})
 
     @patch("bot.extraction.urllib.request.urlopen")
-    def test_extract_event_retries_truncated_json(self, mock_urlopen):
+    def test_extract_event_retries_bad_model_json(self, mock_urlopen):
         def response(content):
             body = MagicMock()
             body.read.return_value = json.dumps(
@@ -149,271 +161,189 @@ class TestExtraction(unittest.TestCase):
             context.__enter__.return_value = body
             return context
 
-        mock_urlopen.side_effect = [
-            response('{"operation": "create", "event_type": "call", "title": "x"'),
-            response('{"operation": "create", "event_type": "call"}'),
-        ]
-        import asyncio
-        result = asyncio.run(extract_event("call", api_key="k", model="m"))
-        self.assertEqual(result.raw["event_type"], "call")
+        mock_urlopen.side_effect = [response("{"), response('{"operation": "create"}')]
+        result = asyncio.run(extract_event([], api_key="key"))
+        self.assertEqual(result.raw["operation"], "create")
         self.assertEqual(mock_urlopen.call_count, 2)
-
-
-class TestResolver(unittest.TestCase):
-    def test_relative_date_and_time(self):
-        payload = resolve({
-            "operation": "create", "event_type": "class", "title": "lab",
-            "date_text": "maine", "time_text": "10:00", "duration_text": None,
-            "end_time_text": None, "location_text": None, "recurrence_text": None,
-            "reminder_texts": [],
-        }, reference=date(2026, 9, 18))
-        self.assertTrue(payload["complete"])
-        self.assertEqual(payload["start"], "2026-09-19T10:00:00+03:00")
-        self.assertEqual(payload["duration_minutes"], 90)
-        self.assertFalse(payload["ambiguous"])
-
-    def test_ambiguous_bare_hour(self):
-        payload = resolve({
-            "operation": "create", "event_type": "meeting", "title": None,
-            "date_text": "today", "time_text": "3", "duration_text": None,
-            "end_time_text": None, "location_text": None, "recurrence_text": None,
-            "reminder_texts": [],
-        }, reference=date(2026, 9, 18))
-        self.assertTrue(payload["ambiguous"])
-
-    def test_unresolved_when_clock_missing(self):
-        payload = resolve({
-            "operation": "create", "event_type": "call", "title": None,
-            "date_text": "maine", "time_text": "la pranz", "duration_text": None,
-            "end_time_text": None, "location_text": None, "recurrence_text": None,
-            "reminder_texts": [],
-        }, reference=date(2026, 9, 18))
-        self.assertIn("time_text", payload["unresolved"])
-        self.assertFalse(payload["complete"])
-
-    def test_reminder_half_and_full_hour(self):
-        payload = resolve({
-            "operation": "create", "event_type": "appointment", "title": None,
-            "date_text": "maine", "time_text": "13:30", "duration_text": None,
-            "end_time_text": None, "location_text": None, "recurrence_text": None,
-            "reminder_texts": ["за два часа", "за полчаса"],
-        }, reference=date(2026, 9, 18))
-        self.assertEqual(payload["reminders_minutes"], [30, 120])
-        self.assertNotIn("reminder_texts", payload["unresolved"])
-
-    def test_trip_duration_is_not_zero(self):
-        payload = resolve({
-            "operation": "create", "event_type": "trip", "title": "excursie",
-            "date_text": "sambata", "time_text": "11:00", "duration_text": None,
-            "end_time_text": None, "location_text": None, "recurrence_text": None,
-            "reminder_texts": [],
-        }, reference=date(2026, 9, 18))
-        self.assertIsNone(payload["duration_minutes"])
-
-    def test_unsupported_recurrence_reported(self):
-        payload = resolve({
-            "operation": "create", "event_type": "meeting", "title": "sync",
-            "date_text": "maine", "time_text": "10:00", "duration_text": None,
-            "end_time_text": None, "location_text": None, "recurrence_text": "каждый день",
-            "reminder_texts": [],
-        }, reference=date(2026, 9, 18))
-        self.assertIsNone(payload["recurrence"])
-        self.assertIn("recurrence_text", payload["unresolved"])
-
-    def test_all_day_keeps_date_and_needs_one(self):
-        payload = resolve({
-            "operation": "create", "event_type": "birthday", "title": "Ana",
-            "date_text": "maine",
-        }, reference=date(2026, 9, 19))
-        self.assertTrue(payload["all_day"])
-        self.assertEqual(payload["date"], "2026-09-20")
-        self.assertEqual(payload["start"], "2026-09-20T00:00:00+03:00")
-        self.assertTrue(payload["complete"])
-        self.assertEqual(payload["missing"], [])
-
-        dateless = resolve({
-            "operation": "create", "event_type": "birthday", "title": "Ana",
-        }, reference=date(2026, 9, 19))
-        self.assertFalse(dateless["complete"])
-        self.assertEqual(dateless["missing"], ["date_text"])
-
-    def test_all_day_marker_for_any_type(self):
-        for phrase in ("All day", "all-day", "toată ziua", "весь день"):
-            payload = resolve({
-                "operation": "create", "event_type": "appointment", "title": "Dentist",
-                "date_text": "maine", "time_text": phrase,
-            }, reference=date(2026, 9, 19))
-            self.assertTrue(payload["all_day"], phrase)
-            self.assertEqual(payload["date"], "2026-09-20")
-            self.assertTrue(payload["complete"], phrase)
-            self.assertEqual(payload["missing"], [], phrase)
-
-    def test_iso_date_from_button_callback(self):
-        self.assertEqual(parse_date("2026-09-20", date(2026, 9, 19)), date(2026, 9, 20))
-
-    def test_missing_fields_for_create(self):
-        payload = resolve({
-            "operation": "create", "event_type": "meeting",
-        }, reference=date(2026, 9, 18))
-        self.assertEqual(payload["missing"], ["title", "date_text", "time_text"])
-        list_payload = resolve({
-            "operation": "list", "event_type": "other",
-        }, reference=date(2026, 9, 18))
-        self.assertEqual(list_payload["missing"], [])
 
 
 class TestRunExtraction(unittest.TestCase):
     @patch("bot.handlers.voice.extract_event", new_callable=AsyncMock)
-    def test_success(self, mock_extract):
-        mock_extract.return_value = Extraction(
-            raw={"operation": "create", "event_type": "class", "date_text": "today",
-                 "time_text": "10:00"},
-            wait_time_seconds=1.2,
-        )
-        import asyncio
+    def test_uses_exact_reference(self, mock_extract):
+        mock_extract.return_value = Extraction(complete_raw(), 1.2)
         raw, resolved, seconds, error = asyncio.run(run_extraction(
-            "lab", mistral_api_key="k", extraction_model="m", extraction_timeout=10,
+            "sync tomorrow 09:00",
+            REFERENCE,
+            deepseek_api_key="key",
+            extraction_model="deepseek-flash",
+            extraction_timeout=10,
         ))
         self.assertIsNone(error)
         self.assertEqual(seconds, 1.2)
+        self.assertEqual(resolved["start"], "2026-09-19T09:00:00+03:00")
+        messages = mock_extract.await_args.args[0]
+        self.assertIn(REFERENCE.isoformat(), messages[1]["content"])
         self.assertEqual(raw["operation"], "create")
-        self.assertTrue(resolved["complete"])
 
     @patch("bot.handlers.voice.extract_event", new_callable=AsyncMock)
-    def test_failure(self, mock_extract):
+    def test_sanitized_failure(self, mock_extract):
         mock_extract.side_effect = ExtractionServiceError("model returned invalid JSON")
-        import asyncio
-        raw, resolved, seconds, error = asyncio.run(run_extraction(
-            "lab", mistral_api_key="k", extraction_model="m", extraction_timeout=10,
+        result = asyncio.run(run_extraction(
+            "sync", REFERENCE, deepseek_api_key="secret",
+            extraction_model="deepseek-flash", extraction_timeout=10,
         ))
-        self.assertIsNone(raw)
-        self.assertIsNone(resolved)
-        self.assertIn("invalid JSON", error)
+        self.assertIsNone(result[0])
+        self.assertIn("invalid JSON", result[3])
+        self.assertNotIn("secret", result[3])
 
 
-class TestFormatResolved(unittest.TestCase):
-    def test_structured_not_raw(self):
-        text = format_resolved({
-            "operation": "create", "event_type": "appointment",
-            "title": "dentist <soon>", "start": "2026-09-19T13:30:00+03:00",
-            "all_day": False, "duration_minutes": 90, "location": "Main St 16/2",
-            "recurrence": None, "reminders_minutes": [30, 120],
-            "ambiguous": False, "complete": True, "unresolved": [],
-        })
-        self.assertNotIn("{", text)
-        self.assertIn("dentist &lt;soon&gt;", text)
-        self.assertIn("1 h 30 min", text)
-        self.assertIn("2 h, 30 min before", text)
-        self.assertIn("13:30", text)
+class TestDrafts(unittest.TestCase):
+    def draft(self, raw, field, record_path):
+        return Draft(deepcopy(raw), ["sync"], REFERENCE, field, record_path)
+
+    def test_strict_date_and_time_patch_nested_json_without_llm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            draft = self.draft(semantic_raw(), "date", Path(directory) / "record.json")
+            result = apply_answer(draft, "2026-09-20")
+            self.assertEqual(draft.raw["date"]["kind"], "absolute")
+            self.assertEqual(draft.awaiting, "time")
+            result = apply_answer(draft, "18:30")
+            self.assertEqual(result["start"], "2026-09-20T18:30:00+03:00")
+            self.assertIsNone(next_field(result))
+
+    def test_invalid_date_and_time_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "record.json"
+            for field, answer in (("date", "tomorrow"), ("time", "nine")):
+                with self.subTest(field=field):
+                    draft = self.draft(semantic_raw(), field, path)
+                    with self.assertRaises(ValueError):
+                        apply_answer(draft, answer)
+                    self.assertEqual(draft.evidence, ["sync"])
+
+    def test_all_day_patch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw = semantic_raw()
+            raw["date"].update(
+                kind="absolute", source="2026-09-20", year=2026, month=9, day=20
+            )
+            draft = self.draft(raw, "time", Path(directory) / "record.json")
+            result = apply_answer(draft, "all day")
+            self.assertTrue(result["all_day"])
+            self.assertEqual(result["start"], "2026-09-20T00:00:00+03:00")
 
 
-class TestDraftFlow(unittest.TestCase):
-    REFERENCE = date(2026, 9, 19)
+class TestPresentation(unittest.TestCase):
+    def test_card_displays_readiness_and_risks(self):
+        resolved = semantic.resolve(complete_raw(), "sync tomorrow 09:00", REFERENCE)
+        text = format_resolved(resolved)
+        self.assertIn("Ready for automatic creation", text)
+        risky = {**resolved, "auto_write": False, "risks": ["weekday"]}
+        self.assertIn("Needs confirmation", format_resolved(risky))
+        self.assertIn("weekday", format_resolved(risky))
 
-    def test_next_field(self):
-        self.assertIsNone(next_field({"missing": []}))
-        self.assertEqual(next_field({"missing": ["title", "time_text"]}), "title")
-
-    def test_begin_keeps_independent_copy(self):
-        drafts = {}
-        raw = {"operation": "create"}
-        drafts[1] = Draft(raw=dict(raw), awaiting="title")
-        raw["title"] = "mutated"
-        self.assertIsNone(drafts[1].raw.get("title"))
-
-    def test_answers_complete_draft_one_field_at_a_time(self):
-        draft = Draft(raw={"operation": "create", "event_type": "meeting"}, awaiting="title")
-        resolve_fn = lambda raw: resolve(raw, reference=self.REFERENCE)
-
-        apply_answer(draft, "sync", resolve_fn)
-        self.assertEqual(draft.awaiting, "date_text")
-
-        apply_answer(draft, "maine", resolve_fn)
-        self.assertEqual(draft.awaiting, "time_text")
-
-        resolved = apply_answer(draft, "10:00", resolve_fn)
-        self.assertEqual(next_field(resolved), None)
-        self.assertEqual(resolved["start"], "2026-09-20T10:00:00+03:00")
-        self.assertTrue(resolved["complete"])
-
-    def test_unparseable_answer_reasks_same_field(self):
-        draft = Draft(
-            raw={"operation": "create", "event_type": "meeting", "title": "sync"},
-            awaiting="date_text",
-        )
-        resolved = apply_answer(
-            draft, "la pranz", lambda raw: resolve(raw, reference=self.REFERENCE)
-        )
-        self.assertEqual(draft.awaiting, "date_text")
-        self.assertFalse(resolved["complete"])
+    def test_questions_publish_strict_formats(self):
+        self.assertIn("YYYY-MM-DD", _question_text("date", {"title": "Sync"}))
+        self.assertIn("HH:MM", _question_text("time", {"title": "Sync"}))
+        date_data = [
+            button.callback_data
+            for row in _question_keyboard("date", REFERENCE.date()).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("ans:date:2026-09-18", date_data)
+        time_data = [
+            button.callback_data
+            for row in _question_keyboard("time", REFERENCE.date()).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("ans:time:all day", time_data)
 
 
-class TestQuestions(unittest.TestCase):
-    REFERENCE = date(2026, 9, 19)
-
-    def test_question_text_uses_title(self):
-        resolved = {"title": "Dentist"}
-        self.assertEqual(_question_text("title", resolved), "❓ What should I call this event?")
-        self.assertIn("<b>Dentist</b>", _question_text("time_text", resolved))
-
-    def test_date_keyboard_offers_today_and_tomorrow(self):
-        markup = _question_keyboard("date_text", self.REFERENCE)
-        data = [button.callback_data for row in markup.inline_keyboard for button in row]
-        self.assertIn("ans:date_text:2026-09-19", data)
-        self.assertIn("ans:date_text:2026-09-20", data)
-        self.assertIn("q_cancel", data)
-
-    def test_time_keyboard_has_all_day(self):
-        markup = _question_keyboard("time_text", self.REFERENCE)
-        data = [button.callback_data for row in markup.inline_keyboard for button in row]
-        self.assertIn("ans:time_text:all day", data)
-        self.assertIn("ans:time_text:09:00", data)
-
-
-class TestReplyEvent(unittest.TestCase):
-    REFERENCE = date(2026, 9, 19)
-
-    def _message(self):
+class TestReplyFlow(unittest.TestCase):
+    def message(self, text="sync"):
         sent = MagicMock()
         sent.chat.id = -100
         sent.message_id = 555
         message = MagicMock()
+        message.text = text
         message.message_id = 42
+        message.from_user.id = 1
         message.answer = AsyncMock(return_value=sent)
         return message
 
-    def test_first_turn_stores_prompt_handle(self):
-        message = self._message()
-        drafts = {}
-        resolved = resolve(
-            {"operation": "create", "event_type": "meeting"}, reference=self.REFERENCE
-        )
-        asyncio.run(reply_event(message, MagicMock(), drafts, 1, {}, resolved, None))
-        draft = drafts.get(1)
-        self.assertEqual(draft.awaiting, "title")
-        self.assertEqual((draft.chat_id, draft.message_id), (-100, 555))
+    def test_incomplete_request_starts_draft_with_original_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "record.json"
+            path.write_text("{}", encoding="utf-8")
+            raw = semantic_raw()
+            resolved = semantic.resolve(raw, "sync", REFERENCE)
+            drafts = {}
+            asyncio.run(reply_event(
+                self.message(), MagicMock(), drafts, 1, raw, resolved, None,
+                reference=REFERENCE, record_path=path, original_text="sync",
+            ))
+            self.assertEqual(drafts[1].reference, REFERENCE)
+            self.assertEqual(drafts[1].awaiting, "date")
+            self.assertEqual((drafts[1].chat_id, drafts[1].message_id), (-100, 555))
 
-    def test_typed_answer_edits_stored_message(self):
-        resolved = resolve(
-            {"operation": "create", "event_type": "meeting", "title": "sync"},
-            reference=self.REFERENCE,
-        )
-        cases = {
-            "edit": None,
-            "not_modified": TelegramBadRequest(
-                method=MagicMock(), message="message is not modified"
-            ),
-        }
-        for name, side_effect in cases.items():
-            with self.subTest(name):
-                message = self._message()
-                bot = MagicMock()
-                bot.edit_message_text = AsyncMock(side_effect=side_effect)
-                drafts = {1: Draft({}, "date_text", chat_id=-100, message_id=555)}
-                asyncio.run(reply_event(message, bot, drafts, 1, {}, resolved, None))
-                self.assertEqual(bot.edit_message_text.await_args.kwargs["chat_id"], -100)
-                self.assertEqual(bot.edit_message_text.await_args.kwargs["message_id"], 555)
-                message.answer.assert_not_awaited()
+    def test_answer_updates_original_record_and_preserves_raw_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "record.json"
+            original = semantic_raw()
+            path.write_text(json.dumps({"extraction": original}), encoding="utf-8")
+            draft = Draft(deepcopy(original), ["sync"], REFERENCE, "date", path)
+            drafts = {1: draft}
+            bot = MagicMock()
+            bot.edit_message_text = AsyncMock()
+            asyncio.run(_answer_draft(self.message("2026-09-20"), bot, drafts, 1, "2026-09-20"))
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["extraction"]["date"]["kind"], "none")
+            self.assertEqual(record["effective_extraction"]["date"]["kind"], "absolute")
+            self.assertEqual(record["clarification_answers"], ["2026-09-20"])
+
+    def test_final_card_keeps_placeholder_buttons(self):
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        message = self.message()
+        asyncio.run(reply_event(message, MagicMock(), {}, 1, raw, resolved, None))
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        callbacks = [button.callback_data for button in markup.inline_keyboard[0]]
+        self.assertEqual(callbacks, ["confirm:42", "edit:42", "cancel:42"])
+
+    def test_voice_reply_is_rejected_before_transcription(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "record.json"
+            draft = Draft(semantic_raw(), ["sync"], REFERENCE, "date", path)
+            message = self.message()
+            message.voice = MagicMock()
+            bot = MagicMock()
+            asyncio.run(handle_voice(
+                message, bot, {1: draft}, "eleven", "scribe_v2", "deepseek",
+                "deepseek-flash", 60, Path(directory), 168, False,
+            ))
+            message.answer.assert_awaited_once()
+            bot.download.assert_not_called()
+
+    @patch("bot.handlers.voice.run_extraction", new_callable=AsyncMock)
+    @patch("bot.handlers.voice.datetime")
+    def test_text_record_contains_provenance(self, mock_datetime, mock_run):
+        mock_datetime.now.return_value = REFERENCE
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        mock_run.return_value = (raw, resolved, 1.23, None)
+        with tempfile.TemporaryDirectory() as directory:
+            message = self.message("sync tomorrow 09:00")
+            asyncio.run(handle_text(
+                message, MagicMock(), {}, "deepseek", "deepseek-flash", 60,
+                Path(directory), 168, False,
+            ))
+            record = json.loads(
+                (Path(directory) / "1" / "42" / "record.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(record["extraction_model"], "deepseek-flash")
+        self.assertEqual(record["contract_hash"], semantic.contract_hash())
+        self.assertEqual(record["extraction_wait_time_seconds"], 1.23)
+        self.assertEqual(record["extraction"], raw)
 
 
 if __name__ == "__main__":

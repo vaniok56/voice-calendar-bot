@@ -58,7 +58,7 @@ async def main_async(config: Config) -> None:
             drafts={},
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.elevenlabs_model,
-            mistral_api_key=config.mistral_api_key,
+            deepseek_api_key=config.deepseek_api_key,
             extraction_model=config.extraction_model,
             extraction_timeout=config.extraction_timeout,
             voice_root=voice_root,

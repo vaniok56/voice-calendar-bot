@@ -1,5 +1,6 @@
 import json
 import logging
+from copy import deepcopy
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
@@ -18,7 +19,7 @@ from ..asr import format_duration, ogg_duration_seconds, transcribe_voice
 from ..drafts import Draft, apply_answer, next_field
 from ..extraction import extract_event
 from ..logging_config import CHISINAU
-from ..resolver import resolve
+from .. import semantic
 
 
 router = Router(name="voice")
@@ -76,8 +77,14 @@ def format_resolved(resolved: dict) -> str:
     if reminders:
         human = ", ".join(_human_minutes(value) for value in sorted(reminders, reverse=True))
         lines.append(f"<b>Reminders:</b> {human} before")
-    if resolved.get("ambiguous"):
-        lines.append("⚠️ Time is ambiguous — please confirm")
+    if resolved.get("auto_write"):
+        lines.append("✅ Ready for automatic creation")
+    else:
+        lines.append("⚠️ Needs confirmation")
+    if resolved.get("errors"):
+        lines.append("<b>Missing or invalid:</b> " + escape(", ".join(resolved["errors"])))
+    if resolved.get("risks"):
+        lines.append("<b>Check:</b> " + escape(", ".join(resolved["risks"])))
     return "\n".join(lines)
 
 
@@ -92,49 +99,65 @@ def _write_record(path: Path, record: dict) -> None:
     temporary.replace(path)
 
 
+def _update_record(path: Path, **updates) -> None:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record.update(updates)
+    _write_record(path, record)
+
+
 async def run_extraction(
-    text: str, *, mistral_api_key: str, extraction_model: str, extraction_timeout: int
+    text: str,
+    reference: datetime,
+    *,
+    deepseek_api_key: str,
+    extraction_model: str,
+    extraction_timeout: int,
 ):
     try:
+        messages = semantic.build_messages(text, reference)
         extraction = await extract_event(
-            text, api_key=mistral_api_key, model=extraction_model, timeout=extraction_timeout
+            messages,
+            api_key=deepseek_api_key,
+            model=extraction_model,
+            timeout=extraction_timeout,
         )
-        return extraction.raw, resolve(extraction.raw), extraction.wait_time_seconds, None
+        resolved = semantic.resolve(extraction.raw, text, reference)
+        return extraction.raw, resolved, extraction.wait_time_seconds, None
     except Exception as error:
         return None, None, None, f"{type(error).__name__}: {error}"
 
 
 def _question_text(field: str, resolved: dict) -> str:
     if field == "title":
-        return "❓ What should I call this event?"
+        return "❓ What should I call this event? Reply with a title."
     name = f" <b>{escape(resolved['title'])}</b>" if resolved.get("title") else ""
-    if field == "date_text":
-        return f"❓ Which date for{name}?"
-    return f"❓ What time for{name}?"
+    if field == "date":
+        return f"❓ Which date for{name}? Reply YYYY-MM-DD or use a button."
+    return f"❓ What time for{name}? Reply HH:MM or use a button."
 
 
 def _question_keyboard(field: str, reference) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    if field == "date_text":
+    if field == "date":
         today, tomorrow = reference, reference + timedelta(days=1)
         rows.append([
             InlineKeyboardButton(
                 text=f"Today · {today:%a %d %b}",
-                callback_data=f"ans:date_text:{today.isoformat()}",
+                callback_data=f"ans:date:{today.isoformat()}",
             ),
             InlineKeyboardButton(
                 text=f"Tomorrow · {tomorrow:%a %d %b}",
-                callback_data=f"ans:date_text:{tomorrow.isoformat()}",
+                callback_data=f"ans:date:{tomorrow.isoformat()}",
             ),
         ])
-    elif field == "time_text":
+    elif field == "time":
         rows.append([
-            InlineKeyboardButton(text="09:00", callback_data="ans:time_text:09:00"),
-            InlineKeyboardButton(text="12:00", callback_data="ans:time_text:12:00"),
-            InlineKeyboardButton(text="18:00", callback_data="ans:time_text:18:00"),
+            InlineKeyboardButton(text="09:00", callback_data="ans:time:09:00"),
+            InlineKeyboardButton(text="12:00", callback_data="ans:time:12:00"),
+            InlineKeyboardButton(text="18:00", callback_data="ans:time:18:00"),
         ])
         rows.append([
-            InlineKeyboardButton(text="🌙 All day", callback_data="ans:time_text:all day"),
+            InlineKeyboardButton(text="🌙 All day", callback_data="ans:time:all day"),
         ])
     rows.append([InlineKeyboardButton(text="Cancel", callback_data="q_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -160,7 +183,18 @@ async def _deliver(message, bot, draft, text, markup):
 
 
 async def reply_event(
-    message: Message, bot, drafts, user_id, raw, resolved, error, *, show_raw=False
+    message: Message,
+    bot,
+    drafts,
+    user_id,
+    raw,
+    resolved,
+    error,
+    *,
+    reference: datetime | None = None,
+    record_path: Path | None = None,
+    original_text: str | None = None,
+    show_raw=False,
 ) -> None:
     if error is not None:
         await message.answer(f"⚠️ Extraction failed: <code>{escape(error)}</code>")
@@ -173,8 +207,6 @@ async def reply_event(
     field = next_field(resolved)
     if field is None:
         text = format_resolved(resolved)
-        if not resolved.get("complete"):
-            text += "\n\n⚠️ Incomplete event"
         markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Confirm", callback_data=f"confirm:{message.message_id}"),
             InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{message.message_id}"),
@@ -185,21 +217,96 @@ async def reply_event(
         return
 
     if draft is None:
-        draft = Draft(raw=dict(raw), awaiting=field)
+        if reference is None or record_path is None or original_text is None:
+            raise ValueError("new draft requires request context")
+        draft = Draft(
+            raw=deepcopy(raw),
+            evidence=[original_text],
+            reference=reference,
+            awaiting=field,
+            record_path=record_path,
+        )
         drafts[user_id] = draft
+    elif draft.attempts >= 6:
+        await _deliver(
+            message,
+            bot,
+            draft,
+            "⚠️ Too many clarification attempts. Send a fresh complete request.",
+            None,
+        )
+        _update_record(draft.record_path, clarification_status="exhausted")
+        drafts.pop(user_id, None)
+        return
     text = f"{format_resolved(resolved)}\n\n{_question_text(field, resolved)}"
-    await _deliver(message, bot, draft, text, _question_keyboard(field, datetime.now(CHISINAU).date()))
+    await _deliver(
+        message,
+        bot,
+        draft,
+        text,
+        _question_keyboard(field, draft.reference.date()),
+    )
 
 
 @router.callback_query(F.data == "q_cancel")
 async def cancel_draft(callback: CallbackQuery, drafts) -> None:
-    drafts.pop(callback.from_user.id, None)
+    draft = drafts.pop(callback.from_user.id, None)
+    if draft is not None:
+        _update_record(draft.record_path, clarification_status="cancelled")
     await callback.answer("Cancelled")
     await callback.message.edit_text("❌ Draft cancelled.")
 
 
+async def _answer_draft(message, bot, drafts, user_id: int, text: str, *, show_raw=False) -> None:
+    draft = drafts.get(user_id)
+    if draft is None:
+        await message.answer("This question is no longer active.")
+        return
+    try:
+        resolved = apply_answer(draft, text)
+    except ValueError as error:
+        draft.attempts += 1
+        resolved = semantic.resolve(
+            draft.raw, "\n".join(draft.evidence), draft.reference
+        )
+        _update_record(
+            draft.record_path,
+            clarification_status=f"awaiting_{draft.awaiting}",
+            last_clarification_error=str(error),
+        )
+        prompt = (
+            f"{format_resolved(resolved)}\n\n⚠️ {escape(str(error))}\n\n"
+            f"{_question_text(draft.awaiting, resolved)}"
+        )
+        await _deliver(
+            message,
+            bot,
+            draft,
+            prompt,
+            _question_keyboard(draft.awaiting, draft.reference.date()),
+        )
+        if draft.attempts >= 6:
+            _update_record(draft.record_path, clarification_status="exhausted")
+            drafts.pop(user_id, None)
+        return
+
+    _update_record(
+        draft.record_path,
+        clarification_answers=draft.evidence[1:],
+        effective_extraction=draft.raw,
+        resolved=resolved,
+        clarification_status=(
+            "completed" if next_field(resolved) is None else f"awaiting_{draft.awaiting}"
+        ),
+        last_clarification_error=None,
+    )
+    await reply_event(
+        message, bot, drafts, user_id, draft.raw, resolved, None, show_raw=show_raw
+    )
+
+
 @router.callback_query(F.data.startswith("ans:"))
-async def answer_field(callback: CallbackQuery, bot: Bot, drafts) -> None:
+async def answer_field(callback: CallbackQuery, bot: Bot, drafts, debug: bool) -> None:
     user_id = callback.from_user.id
     draft = drafts.get(user_id)
     _, field, value = callback.data.split(":", 2)
@@ -207,8 +314,9 @@ async def answer_field(callback: CallbackQuery, bot: Bot, drafts) -> None:
         await callback.answer("This question is no longer active.", show_alert=True)
         return
     await callback.answer()
-    resolved = apply_answer(draft, value, resolve)
-    await reply_event(callback.message, bot, drafts, user_id, draft.raw, resolved, None)
+    await _answer_draft(
+        callback.message, bot, drafts, user_id, value, show_raw=debug
+    )
 
 
 
@@ -219,13 +327,18 @@ async def handle_voice(
     drafts,
     elevenlabs_api_key: str,
     elevenlabs_model: str,
-    mistral_api_key: str,
+    deepseek_api_key: str,
     extraction_model: str,
     extraction_timeout: int,
     voice_root: Path,
     voice_retention_hours: int,
     debug: bool,
 ) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    if drafts.get(user_id) is not None:
+        await message.answer("Please answer with text or the provided buttons; voice replies are not accepted.")
+        return
+
     voice = message.voice
     if voice is None or voice.file_size is None or voice.file_size <= 0:
         await message.answer("Voice message has no usable audio data.")
@@ -235,7 +348,6 @@ async def handle_voice(
         await message.answer("Voice message exceeds the 2 MiB limit.")
         return
 
-    user_id = message.from_user.id if message.from_user else 0
     received_at = datetime.now(CHISINAU)
     record_dir = voice_root / str(user_id) / str(message.message_id)
     try:
@@ -251,9 +363,15 @@ async def handle_voice(
         "status": "processing",
         "transcript": None,
         "language_code": None,
+        "extraction_model": extraction_model,
+        "contract_hash": semantic.contract_hash(),
         "extraction": None,
+        "effective_extraction": None,
         "resolved": None,
+        "extraction_wait_time_seconds": None,
         "extraction_error": None,
+        "clarification_answers": [],
+        "clarification_status": None,
         "error": None,
     }
     _write_record(record_path, record)
@@ -266,24 +384,10 @@ async def handle_voice(
             audio_path, api_key=elevenlabs_api_key, model_id=elevenlabs_model
         )
 
-        draft = drafts.get(user_id)
-        if draft is not None:
-            resolved = apply_answer(draft, result.text, resolve)
-            record.update(
-                status="completed",
-                transcript=result.text,
-                language_code=result.language_code,
-                resolved=resolved,
-            )
-            _write_record(record_path, record)
-            await reply_event(
-                message, bot, drafts, user_id, draft.raw, resolved, None, show_raw=debug
-            )
-            return
-
         extraction_raw, resolved, extraction_seconds, extraction_error = await run_extraction(
             result.text,
-            mistral_api_key=mistral_api_key,
+            received_at,
+            deepseek_api_key=deepseek_api_key,
             extraction_model=extraction_model,
             extraction_timeout=extraction_timeout,
         )
@@ -301,7 +405,13 @@ async def handle_voice(
             language_code=result.language_code,
             extraction=extraction_raw,
             resolved=resolved,
+            extraction_wait_time_seconds=extraction_seconds,
             extraction_error=extraction_error,
+            clarification_status=(
+                f"awaiting_{next_field(resolved)}"
+                if resolved is not None and next_field(resolved) is not None
+                else None
+            ),
         )
         _write_record(record_path, record)
 
@@ -317,7 +427,17 @@ async def handle_voice(
 
         await message.answer(escape(result.text))
         await reply_event(
-            message, bot, drafts, user_id, extraction_raw, resolved, extraction_error, show_raw=debug
+            message,
+            bot,
+            drafts,
+            user_id,
+            extraction_raw,
+            resolved,
+            extraction_error,
+            reference=received_at,
+            record_path=record_path,
+            original_text=result.text,
+            show_raw=debug,
         )
 
         if debug:
@@ -347,7 +467,7 @@ async def handle_text(
     message: Message,
     bot: Bot,
     drafts,
-    mistral_api_key: str,
+    deepseek_api_key: str,
     extraction_model: str,
     extraction_timeout: int,
     text_root: Path,
@@ -358,8 +478,9 @@ async def handle_text(
 
     draft = drafts.get(user_id)
     if draft is not None:
-        resolved = apply_answer(draft, message.text, resolve)
-        await reply_event(message, bot, drafts, user_id, draft.raw, resolved, None)
+        await _answer_draft(
+            message, bot, drafts, user_id, message.text, show_raw=debug
+        )
         return
 
     received_at = datetime.now(CHISINAU)
@@ -375,9 +496,15 @@ async def handle_text(
         "expires_at": (received_at + timedelta(hours=voice_retention_hours)).isoformat(),
         "status": "processing",
         "text": message.text,
+        "extraction_model": extraction_model,
+        "contract_hash": semantic.contract_hash(),
         "extraction": None,
+        "effective_extraction": None,
         "resolved": None,
+        "extraction_wait_time_seconds": None,
         "extraction_error": None,
+        "clarification_answers": [],
+        "clarification_status": None,
         "error": None,
     }
     _write_record(record_path, record)
@@ -385,7 +512,8 @@ async def handle_text(
     try:
         extraction_raw, resolved, extraction_seconds, extraction_error = await run_extraction(
             message.text,
-            mistral_api_key=mistral_api_key,
+            received_at,
+            deepseek_api_key=deepseek_api_key,
             extraction_model=extraction_model,
             extraction_timeout=extraction_timeout,
         )
@@ -393,7 +521,13 @@ async def handle_text(
             status="completed",
             extraction=extraction_raw,
             resolved=resolved,
+            extraction_wait_time_seconds=extraction_seconds,
             extraction_error=extraction_error,
+            clarification_status=(
+                f"awaiting_{next_field(resolved)}"
+                if resolved is not None and next_field(resolved) is not None
+                else None
+            ),
         )
         _write_record(record_path, record)
         if extraction_error is not None:
@@ -405,7 +539,17 @@ async def handle_text(
             )
 
         await reply_event(
-            message, bot, drafts, user_id, extraction_raw, resolved, extraction_error, show_raw=debug
+            message,
+            bot,
+            drafts,
+            user_id,
+            extraction_raw,
+            resolved,
+            extraction_error,
+            reference=received_at,
+            record_path=record_path,
+            original_text=message.text,
+            show_raw=debug,
         )
         if debug:
             await message.answer(

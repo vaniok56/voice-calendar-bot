@@ -34,6 +34,13 @@ PROVIDERS = {
         "schema_mode": "json_schema",
         "token_param": "max_tokens",
     },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "env": "DEEPSEEK_API",
+        "schema_mode": "json_object",
+        "token_param": "max_tokens",
+        "request_options": {"thinking": {"type": "disabled"}},
+    },
 }
 
 
@@ -58,6 +65,7 @@ def chat(
     *,
     schema_mode: str = "json_schema",
     token_param: str = "max_tokens",
+    request_options: dict | None = None,
     timeout: int = 180,
     max_tokens: int = 2048,
 ) -> tuple[str, dict, float]:
@@ -68,6 +76,7 @@ def chat(
         token_param: max_tokens,
         "response_format": _response_format(schema_mode),
     }
+    body.update(request_options or {})
     request = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode("utf-8"),
@@ -152,4 +161,5 @@ def complete(provider: str, model: str, messages: list[dict],
         messages,
         schema_mode=schema_mode or config["schema_mode"],
         token_param=config["token_param"],
+        request_options=config.get("request_options"),
     )

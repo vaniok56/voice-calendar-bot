@@ -6,12 +6,14 @@ import unittest
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiogram.exceptions import TelegramBadRequest
 
 from . import semantic
 from .asr import ASRServiceError, TranscriptionResponse, format_duration, transcribe_voice
+from .calendar import load_write, save_token
 from .config import load_config
 from .drafts import Draft, apply_answer, next_field
 from .extraction import (
@@ -26,6 +28,7 @@ from .handlers.voice import (
     _question_keyboard,
     _question_text,
     format_resolved,
+    confirm_calendar_write,
     handle_text,
     handle_voice,
     reply_event,
@@ -309,6 +312,80 @@ class TestReplyFlow(unittest.TestCase):
         markup = message.answer.await_args.kwargs["reply_markup"]
         callbacks = [button.callback_data for button in markup.inline_keyboard[0]]
         self.assertEqual(callbacks, ["confirm:42", "edit:42", "cancel:42"])
+
+    def calendar_config(self, data_dir, enabled):
+        return SimpleNamespace(
+            data_dir=Path(data_dir),
+            calendar_timezone="Europe/Chisinau",
+            calendar_write_enabled=enabled,
+            google_oauth_client_id="client",
+            google_oauth_client_secret="secret",
+        )
+
+    def calendar_record_path(self, directory):
+        path = Path(directory) / "text" / "1" / "42" / "record.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    def test_disabled_mode_shadows_without_google_request(self):
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, False)
+            save_token(config.data_dir, 1, {"access_token": "access"})
+            message = self.message()
+            asyncio.run(reply_event(
+                message, MagicMock(), {}, 1, raw, resolved, None,
+                record_path=self.calendar_record_path(directory), config=config,
+            ))
+            write_path = next((Path(directory) / "google-calendar" / "writes").glob("*.json"))
+            write = load_write(config.data_dir, write_path.stem)
+        self.assertEqual(write["status"], "shadowed")
+        self.assertIn("Shadowed", message.answer.await_args.args[0])
+
+    @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
+    def test_auto_write_creates_once_when_connected(self, mock_insert):
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        mock_insert.return_value = {"id": "google-event", "htmlLink": "https://calendar.google/event"}
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, True)
+            save_token(config.data_dir, 1, {
+                "access_token": "access", "refresh_token": "refresh",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            })
+            asyncio.run(reply_event(
+                self.message(), MagicMock(), {}, 1, raw, resolved, None,
+                record_path=self.calendar_record_path(directory), config=config,
+            ))
+        mock_insert.assert_awaited_once()
+
+    @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
+    def test_confirm_retry_does_not_duplicate_event(self, mock_insert):
+        raw = complete_raw()
+        raw["location"] = "office"
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00 office", REFERENCE)
+        mock_insert.return_value = {"id": "google-event"}
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, True)
+            save_token(config.data_dir, 1, {
+                "access_token": "access", "refresh_token": "refresh",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            })
+            asyncio.run(reply_event(
+                self.message(), MagicMock(), {}, 1, raw, resolved, None,
+                record_path=self.calendar_record_path(directory), config=config,
+            ))
+            write_path = next((Path(directory) / "google-calendar" / "writes").glob("*.json"))
+            callback = MagicMock()
+            callback.data = f"confirm:{write_path.stem}"
+            callback.from_user.id = 1
+            callback.answer = AsyncMock()
+            callback.message.edit_text = AsyncMock()
+            asyncio.run(confirm_calendar_write(callback, config))
+            asyncio.run(confirm_calendar_write(callback, config))
+        mock_insert.assert_awaited_once()
 
     def test_voice_reply_is_rejected_before_transcription(self):
         with tempfile.TemporaryDirectory() as directory:

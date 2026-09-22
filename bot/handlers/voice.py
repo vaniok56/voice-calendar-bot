@@ -16,6 +16,24 @@ from aiogram.types import (
 )
 
 from ..asr import format_duration, ogg_duration_seconds, transcribe_voice
+from ..calendar import (
+    CalendarAPIError,
+    CalendarAuthError,
+    CalendarPayloadError,
+    _token_is_expired,
+    build_event,
+    claim_write,
+    create_write,
+    edit_payload,
+    insert_event,
+    load_token,
+    load_write,
+    new_google_event_id,
+    refresh_access_token,
+    replace_write_payload,
+    save_token,
+    update_write,
+)
 from ..drafts import Draft, apply_answer, next_field
 from ..extraction import extract_event
 from ..logging_config import CHISINAU
@@ -103,6 +121,71 @@ def _update_record(path: Path, **updates) -> None:
     record = json.loads(path.read_text(encoding="utf-8"))
     record.update(updates)
     _write_record(path, record)
+
+
+def _source_record(record_path: Path, config) -> str:
+    try:
+        return record_path.relative_to(config.data_dir).as_posix()
+    except ValueError as error:
+        raise CalendarPayloadError("Calendar source record is outside data storage") from error
+
+
+def _calendar_markup(write_id: str, all_day: bool) -> InlineKeyboardMarkup:
+    del all_day
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Confirm", callback_data=f"confirm:{write_id}"),
+            InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{write_id}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel:{write_id}"),
+        ],
+    ])
+
+
+def _edit_fields_markup(write_id: str, all_day: bool) -> InlineKeyboardMarkup:
+    fields = [
+        InlineKeyboardButton(text="Title", callback_data=f"edit_field:{write_id}:title"),
+        InlineKeyboardButton(text="Date", callback_data=f"edit_field:{write_id}:date"),
+    ]
+    if not all_day:
+        fields.append(InlineKeyboardButton(text="Time", callback_data=f"edit_field:{write_id}:time"))
+    return InlineKeyboardMarkup(inline_keyboard=[fields])
+
+
+def _calendar_text(payload: dict, status: str, html_link: str | None = None) -> str:
+    lines = ["📅 <b>Calendar event</b>", f"<b>Title:</b> {escape(payload['summary'])}"]
+    start = payload["start"]
+    if "date" in start:
+        lines.append(f"<b>When:</b> {escape(start['date'])} (all day)")
+    else:
+        lines.append(f"<b>Start:</b> {escape(start['dateTime'])}")
+    if payload.get("location"):
+        lines.append(f"<b>Location:</b> {escape(payload['location'])}")
+    lines.append(status)
+    if html_link:
+        lines.append(f'<a href="{escape(html_link, quote=True)}">Open in Google Calendar</a>')
+    return "\n".join(lines)
+
+
+async def _execute_calendar_write(config, write: dict) -> dict:
+    write_id = write["write_id"]
+    try:
+        token = load_token(config.data_dir, write["telegram_user_id"])
+        if token is None:
+            raise CalendarAuthError("Google Calendar is not connected")
+        if _token_is_expired(token):
+            token = await refresh_access_token(config, token)
+            save_token(config.data_dir, write["telegram_user_id"], token)
+        event = await insert_event(token, write["payload"])
+    except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:
+        return update_write(config.data_dir, write_id, status="failed", error=str(error))
+    return update_write(
+        config.data_dir,
+        write_id,
+        status="created",
+        google_event_id=event.get("id"),
+        google_html_link=event.get("htmlLink"),
+        error=None,
+    )
 
 
 async def run_extraction(
@@ -195,6 +278,7 @@ async def reply_event(
     record_path: Path | None = None,
     original_text: str | None = None,
     show_raw=False,
+    config=None,
 ) -> None:
     if error is not None:
         await message.answer(f"⚠️ Extraction failed: <code>{escape(error)}</code>")
@@ -207,6 +291,68 @@ async def reply_event(
     field = next_field(resolved)
     if field is None:
         text = format_resolved(resolved)
+        if config is not None and record_path is not None:
+            try:
+                token = load_token(config.data_dir, user_id)
+            except CalendarAuthError:
+                token = None
+            if token is None:
+                markup = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Connect Google Calendar", callback_data="connect_calendar"
+                    )
+                ]])
+                await _deliver(message, bot, draft, text, markup)
+                drafts.pop(user_id, None)
+                return
+            try:
+                payload = build_event(
+                    resolved, new_google_event_id(), config.calendar_timezone
+                )
+                write = create_write(
+                    config.data_dir, user_id, _source_record(record_path, config), payload
+                )
+            except CalendarPayloadError as error:
+                await _deliver(
+                    message, bot, draft, text + f"\n\n⚠️ Calendar payload error: {escape(str(error))}", None
+                )
+                drafts.pop(user_id, None)
+                return
+            if not config.calendar_write_enabled:
+                write = update_write(config.data_dir, write["write_id"], status="shadowed")
+                await _deliver(
+                    message,
+                    bot,
+                    draft,
+                    _calendar_text(write["payload"], "🕶️ Shadowed: Google writes are disabled."),
+                    None,
+                )
+                drafts.pop(user_id, None)
+                return
+            if resolved.get("auto_write"):
+                write = claim_write(config.data_dir, write["write_id"])
+                if write is None:
+                    raise CalendarPayloadError("Calendar write could not be started")
+                write = await _execute_calendar_write(config, write)
+                if write["status"] == "created":
+                    status = "✅ Created"
+                else:
+                    status = "⚠️ Google Calendar creation failed. Reconnect and send again."
+                await _deliver(
+                    message, bot, draft,
+                    _calendar_text(write["payload"], status, write.get("google_html_link")), None,
+                )
+                drafts.pop(user_id, None)
+                return
+            await _deliver(
+                message,
+                bot,
+                draft,
+                text,
+                _calendar_markup(write["write_id"], resolved.get("all_day", False)),
+            )
+            drafts.pop(user_id, None)
+            return
         markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✅ Confirm", callback_data=f"confirm:{message.message_id}"),
             InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{message.message_id}"),
@@ -257,7 +403,9 @@ async def cancel_draft(callback: CallbackQuery, drafts) -> None:
     await callback.message.edit_text("❌ Draft cancelled.")
 
 
-async def _answer_draft(message, bot, drafts, user_id: int, text: str, *, show_raw=False) -> None:
+async def _answer_draft(
+    message, bot, drafts, user_id: int, text: str, *, show_raw=False, config=None
+) -> None:
     draft = drafts.get(user_id)
     if draft is None:
         await message.answer("This question is no longer active.")
@@ -301,12 +449,13 @@ async def _answer_draft(message, bot, drafts, user_id: int, text: str, *, show_r
         last_clarification_error=None,
     )
     await reply_event(
-        message, bot, drafts, user_id, draft.raw, resolved, None, show_raw=show_raw
+        message, bot, drafts, user_id, draft.raw, resolved, None,
+        record_path=draft.record_path, show_raw=show_raw, config=config,
     )
 
 
 @router.callback_query(F.data.startswith("ans:"))
-async def answer_field(callback: CallbackQuery, bot: Bot, drafts, debug: bool) -> None:
+async def answer_field(callback: CallbackQuery, bot: Bot, drafts, debug: bool, config) -> None:
     user_id = callback.from_user.id
     draft = drafts.get(user_id)
     _, field, value = callback.data.split(":", 2)
@@ -315,7 +464,131 @@ async def answer_field(callback: CallbackQuery, bot: Bot, drafts, debug: bool) -
         return
     await callback.answer()
     await _answer_draft(
-        callback.message, bot, drafts, user_id, value, show_raw=debug
+        callback.message, bot, drafts, user_id, value, show_raw=debug, config=config
+    )
+
+
+def _callback_write(config, callback: CallbackQuery, prefix: str) -> dict | None:
+    write_id = callback.data.removeprefix(prefix).split(":", 1)[0]
+    try:
+        write = load_write(config.data_dir, write_id)
+    except CalendarPayloadError:
+        return None
+    if write is None or write.get("telegram_user_id") != callback.from_user.id:
+        return None
+    return write
+
+
+@router.callback_query(F.data.startswith("confirm:"))
+async def confirm_calendar_write(callback: CallbackQuery, config) -> None:
+    write = _callback_write(config, callback, "confirm:")
+    if write is None:
+        await callback.answer("This Calendar action is no longer available.", show_alert=True)
+        return
+    if write["status"] == "created":
+        await callback.answer("Already created.")
+        return
+    if not config.calendar_write_enabled:
+        write = update_write(config.data_dir, write["write_id"], status="shadowed")
+        await callback.answer("Google writes are disabled.", show_alert=True)
+        await callback.message.edit_text(
+            _calendar_text(write["payload"], "🕶️ Shadowed: Google writes are disabled.")
+        )
+        return
+    write = claim_write(config.data_dir, write["write_id"])
+    if write is None:
+        await callback.answer("This Calendar action is no longer available.", show_alert=True)
+        return
+    await callback.answer()
+    write = await _execute_calendar_write(config, write)
+    if write["status"] == "created":
+        text = _calendar_text(write["payload"], "✅ Created", write.get("google_html_link"))
+    else:
+        text = _calendar_text(write["payload"], "⚠️ Google Calendar creation failed.")
+    await callback.message.edit_text(text)
+
+
+@router.callback_query(F.data.startswith("edit:"))
+async def start_calendar_edit(callback: CallbackQuery, config) -> None:
+    write = _callback_write(config, callback, "edit:")
+    if write is None or write["status"] != "pending":
+        await callback.answer("This Calendar action is no longer available.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.edit_text(
+        _calendar_text(write["payload"], "Choose a field to edit."),
+        reply_markup=_edit_fields_markup(
+            write["write_id"], "date" in write["payload"]["start"]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("edit_field:"))
+async def choose_calendar_edit(callback: CallbackQuery, config, calendar_edits) -> None:
+    try:
+        _, write_id, field = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer("Invalid Calendar action.", show_alert=True)
+        return
+    write = _callback_write(config, callback, "edit_field:")
+    if write is None or write["status"] != "pending" or field not in {"title", "date", "time"}:
+        await callback.answer("This Calendar action is no longer available.", show_alert=True)
+        return
+    if field == "time" and "date" in write["payload"]["start"]:
+        await callback.answer("All-day event time cannot be edited.", show_alert=True)
+        return
+    calendar_edits[callback.from_user.id] = {
+        "write_id": write_id,
+        "field": field,
+        "chat_id": callback.message.chat.id,
+        "message_id": callback.message.message_id,
+    }
+    prompts = {
+        "title": "Reply with a title.",
+        "date": "Reply YYYY-MM-DD.",
+        "time": "Reply HH:MM (24-hour time).",
+    }
+    await callback.answer()
+    await callback.message.edit_text(
+        _calendar_text(write["payload"], prompts[field]),
+    )
+
+
+@router.callback_query(F.data.startswith("cancel:"))
+async def cancel_calendar_write(callback: CallbackQuery, config, calendar_edits) -> None:
+    write = _callback_write(config, callback, "cancel:")
+    if write is None or write["status"] != "pending":
+        await callback.answer("This Calendar action is no longer available.", show_alert=True)
+        return
+    calendar_edits.pop(callback.from_user.id, None)
+    write = update_write(config.data_dir, write["write_id"], status="cancelled")
+    await callback.answer("Cancelled")
+    await callback.message.edit_text(_calendar_text(write["payload"], "❌ Cancelled"))
+
+
+async def _answer_calendar_edit(message, bot, calendar_edits, config) -> None:
+    pending = calendar_edits.get(message.from_user.id)
+    if pending is None or config is None:
+        return
+    try:
+        write = load_write(config.data_dir, pending["write_id"])
+        if write is None or write["telegram_user_id"] != message.from_user.id:
+            raise CalendarPayloadError("Calendar write was not found")
+        payload = edit_payload(
+            write["payload"], pending["field"], message.text, config.calendar_timezone
+        )
+        write = replace_write_payload(config.data_dir, write["write_id"], payload)
+    except CalendarPayloadError as error:
+        await message.answer(f"⚠️ {escape(str(error))}")
+        return
+    calendar_edits.pop(message.from_user.id, None)
+    await bot.edit_message_text(
+        chat_id=pending["chat_id"],
+        message_id=pending["message_id"],
+        text=_calendar_text(write["payload"], "Updated. Confirm when ready."),
+        reply_markup=_calendar_markup(
+            write["write_id"], "date" in write["payload"]["start"]
+        ),
     )
 
 
@@ -333,10 +606,15 @@ async def handle_voice(
     voice_root: Path,
     voice_retention_hours: int,
     debug: bool,
+    config=None,
+    calendar_edits=None,
 ) -> None:
     user_id = message.from_user.id if message.from_user else 0
     if drafts.get(user_id) is not None:
         await message.answer("Please answer with text or the provided buttons; voice replies are not accepted.")
+        return
+    if calendar_edits and user_id in calendar_edits:
+        await message.answer("Please reply with text while editing a Calendar event.")
         return
 
     voice = message.voice
@@ -438,6 +716,7 @@ async def handle_voice(
             record_path=record_path,
             original_text=result.text,
             show_raw=debug,
+            config=config,
         )
 
         if debug:
@@ -473,13 +752,19 @@ async def handle_text(
     text_root: Path,
     voice_retention_hours: int,
     debug: bool,
+    config=None,
+    calendar_edits=None,
 ) -> None:
     user_id = message.from_user.id if message.from_user else 0
+
+    if calendar_edits is not None and user_id in calendar_edits:
+        await _answer_calendar_edit(message, bot, calendar_edits, config)
+        return
 
     draft = drafts.get(user_id)
     if draft is not None:
         await _answer_draft(
-            message, bot, drafts, user_id, message.text, show_raw=debug
+            message, bot, drafts, user_id, message.text, show_raw=debug, config=config
         )
         return
 
@@ -550,6 +835,7 @@ async def handle_text(
             record_path=record_path,
             original_text=message.text,
             show_raw=debug,
+            config=config,
         )
         if debug:
             await message.answer(

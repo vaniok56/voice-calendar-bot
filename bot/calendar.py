@@ -3,10 +3,11 @@ import hashlib
 import json
 import re
 import secrets
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 
@@ -195,7 +196,7 @@ def _write_path(data_dir: Path, write_id: str) -> Path:
     return _calendar_root(data_dir) / "writes" / f"{write_id}.json"
 
 
-def _new_google_event_id() -> str:
+def new_google_event_id() -> str:
     return "evt" + "".join(secrets.choice("0123456789abcdefghijklmnopqrstuv") for _ in range(29))
 
 
@@ -208,12 +209,15 @@ def create_write(
         raise CalendarPayloadError("Calendar write source record is required")
     if not isinstance(payload, dict):
         raise CalendarPayloadError("Calendar event payload is invalid")
+    event_id = payload.get("id")
+    if EVENT_ID.fullmatch(event_id or "") is None:
+        raise CalendarPayloadError("Calendar event payload is invalid")
     write_id = secrets.token_urlsafe(18)
     record = {
         "write_id": write_id,
         "telegram_user_id": user_id,
         "source_record": source_record,
-        "event_id": _new_google_event_id(),
+        "event_id": event_id,
         "payload_fingerprint": hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest(),
@@ -247,6 +251,82 @@ def update_write(data_dir: Path, write_id: str, **updates) -> dict:
     record.update(updates)
     _write_private_json(_write_path(data_dir, write_id), record)
     return record
+
+
+def claim_write(data_dir: Path, write_id: str) -> dict | None:
+    record = load_write(data_dir, write_id)
+    if record is None or record.get("status") not in {"pending", "creating", "failed"}:
+        return None
+    return update_write(data_dir, write_id, status="creating", error=None)
+
+
+def replace_write_payload(data_dir: Path, write_id: str, payload: dict) -> dict:
+    record = load_write(data_dir, write_id)
+    if record is None or record.get("status") != "pending":
+        raise CalendarPayloadError("Calendar write can no longer be edited")
+    if not isinstance(payload, dict) or payload.get("id") != record.get("event_id"):
+        raise CalendarPayloadError("Calendar event payload is invalid")
+    return update_write(
+        data_dir,
+        write_id,
+        payload=payload,
+        payload_fingerprint=hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+
+def edit_payload(payload: dict, field: str, value: str, timezone_name: str) -> dict:
+    event = deepcopy(payload)
+    try:
+        zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as error:
+        raise CalendarPayloadError("Invalid calendar timezone") from error
+    if field == "title":
+        if not value.strip():
+            raise CalendarPayloadError("Title must not be empty")
+        event["summary"] = value.strip()
+        return event
+    if field == "date":
+        try:
+            day = date.fromisoformat(value.strip())
+        except ValueError as error:
+            raise CalendarPayloadError("Use YYYY-MM-DD") from error
+        if "date" in event.get("start", {}):
+            event["start"]["date"] = day.isoformat()
+            event["end"]["date"] = (day + timedelta(days=1)).isoformat()
+            return event
+        try:
+            start = datetime.fromisoformat(event["start"]["dateTime"])
+            end = datetime.fromisoformat(event["end"]["dateTime"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CalendarPayloadError("Calendar event payload is invalid") from error
+        duration = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+        start = datetime.combine(day, start.timetz().replace(tzinfo=None), zone)
+        end = (start.astimezone(timezone.utc) + duration).astimezone(zone)
+        event["start"]["dateTime"] = start.isoformat()
+        event["end"]["dateTime"] = end.isoformat()
+        return event
+    if field == "time":
+        if "date" in event.get("start", {}):
+            raise CalendarPayloadError("All-day event time cannot be edited")
+        try:
+            hour, minute = map(int, value.strip().split(":"))
+            if not 0 <= hour <= 23 or not 0 <= minute <= 59 or len(value.strip()) != 5:
+                raise ValueError
+            start = datetime.fromisoformat(event["start"]["dateTime"])
+            end = datetime.fromisoformat(event["end"]["dateTime"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CalendarPayloadError("Use HH:MM (24-hour time)") from error
+        duration = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+        start = datetime.combine(start.date(), datetime.min.time(), zone).replace(
+            hour=hour, minute=minute
+        )
+        end = (start.astimezone(timezone.utc) + duration).astimezone(zone)
+        event["start"]["dateTime"] = start.isoformat()
+        event["end"]["dateTime"] = end.isoformat()
+        return event
+    raise CalendarPayloadError("Unsupported calendar edit field")
 
 
 def _token_is_expired(token: dict, *, now: datetime | None = None) -> bool:

@@ -15,6 +15,7 @@ from .calendar import (
     create_authorization_url,
     create_write,
     disconnect,
+    edit_payload,
     insert_event,
     load_write,
     load_token,
@@ -163,16 +164,27 @@ class TestCalendarWrites(unittest.TestCase):
                 "title": "Sync", "start": "2026-09-19T09:00:00+03:00",
                 "all_day": False, "duration_minutes": 60, "location": None,
                 "recurrence": None, "reminders_minutes": [],
-            }, EVENT_ID)
+            }, "evt0123456789abcdefghijklmnopqrstuv")
             record = create_write(Path(directory), 123, "text/123/456/record.json", payload)
             self.assertEqual(record["status"], "pending")
-            self.assertRegex(record["event_id"], r"^evt[a-v0-9]{29}$")
+            self.assertEqual(record["event_id"], payload["id"])
+            self.assertLessEqual(len(f"edit_field:{record['write_id']}:title".encode()), 64)
             self.assertEqual(load_write(Path(directory), record["write_id"]), record)
             updated = update_write(
                 Path(directory), record["write_id"], status="creating"
             )
             self.assertEqual(updated["event_id"], record["event_id"])
             self.assertEqual(updated["status"], "creating")
+
+    def test_pending_payload_edit_keeps_event_id(self):
+        payload = build_event({
+            "title": "Sync", "start": "2026-09-19T09:00:00+03:00",
+            "all_day": False, "duration_minutes": 60, "location": None,
+            "recurrence": None, "reminders_minutes": [],
+        }, "evt0123456789abcdefghijklmnopqrstuv")
+        edited = edit_payload(payload, "time", "10:30", "Europe/Chisinau")
+        self.assertEqual(edited["id"], payload["id"])
+        self.assertEqual(edited["start"]["dateTime"], "2026-09-19T10:30:00+03:00")
 
     @patch("bot.calendar.aiohttp.ClientSession")
     def test_refresh_access_token(self, client_session):

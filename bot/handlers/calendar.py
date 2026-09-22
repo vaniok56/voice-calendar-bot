@@ -1,7 +1,7 @@
 from aiohttp import web
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from ..calendar import (
     CalendarAuthError,
@@ -25,6 +25,20 @@ async def connect_calendar(message: Message, config) -> None:
         await message.answer("Google Calendar connection is not configured.")
         return
     await message.answer(
+        "Open this link to connect Google Calendar. It expires in 10 minutes:\n" + url,
+        disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data == "connect_calendar")
+async def connect_calendar_button(callback: CallbackQuery, config) -> None:
+    try:
+        url = create_authorization_url(config, callback.from_user.id)
+    except CalendarAuthError:
+        await callback.answer("Google Calendar connection is not configured.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.answer(
         "Open this link to connect Google Calendar. It expires in 10 minutes:\n" + url,
         disable_web_page_preview=True,
     )

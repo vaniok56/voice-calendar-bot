@@ -66,6 +66,7 @@ async def main_async(config: Config) -> None:
             bot,
             storage=storage,
             drafts={},
+            calendar_edits={},
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.elevenlabs_model,
             deepseek_api_key=config.deepseek_api_key,

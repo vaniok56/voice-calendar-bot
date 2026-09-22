@@ -18,7 +18,9 @@ EVENT_ID = re.compile(r"[a-v0-9]{5,1024}\Z")
 WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
 OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 STATE_TTL = timedelta(minutes=10)
+WRITE_ID = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
 
 
 class CalendarPayloadError(ValueError):
@@ -26,6 +28,10 @@ class CalendarPayloadError(ValueError):
 
 
 class CalendarAuthError(ValueError):
+    pass
+
+
+class CalendarAPIError(RuntimeError):
     pass
 
 
@@ -181,6 +187,138 @@ def disconnect(data_dir: Path, user_id: int) -> bool:
         return False
     path.unlink()
     return True
+
+
+def _write_path(data_dir: Path, write_id: str) -> Path:
+    if WRITE_ID.fullmatch(write_id) is None:
+        raise CalendarPayloadError("Invalid calendar write ID")
+    return _calendar_root(data_dir) / "writes" / f"{write_id}.json"
+
+
+def _new_google_event_id() -> str:
+    return "evt" + "".join(secrets.choice("0123456789abcdefghijklmnopqrstuv") for _ in range(29))
+
+
+def create_write(
+    data_dir: Path, user_id: int, source_record: str, payload: dict
+) -> dict:
+    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
+        raise CalendarPayloadError("Invalid Telegram user")
+    if not isinstance(source_record, str) or not source_record:
+        raise CalendarPayloadError("Calendar write source record is required")
+    if not isinstance(payload, dict):
+        raise CalendarPayloadError("Calendar event payload is invalid")
+    write_id = secrets.token_urlsafe(18)
+    record = {
+        "write_id": write_id,
+        "telegram_user_id": user_id,
+        "source_record": source_record,
+        "event_id": _new_google_event_id(),
+        "payload_fingerprint": hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "payload": payload,
+        "status": "pending",
+        "google_event_id": None,
+        "google_html_link": None,
+        "error": None,
+    }
+    _write_private_json(_write_path(data_dir, write_id), record)
+    return record
+
+
+def load_write(data_dir: Path, write_id: str) -> dict | None:
+    path = _write_path(data_dir, write_id)
+    if not path.exists():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CalendarPayloadError("Stored calendar write is invalid") from error
+    if not isinstance(record, dict) or record.get("write_id") != write_id:
+        raise CalendarPayloadError("Stored calendar write is invalid")
+    return record
+
+
+def update_write(data_dir: Path, write_id: str, **updates) -> dict:
+    record = load_write(data_dir, write_id)
+    if record is None:
+        raise CalendarPayloadError("Calendar write was not found")
+    record.update(updates)
+    _write_private_json(_write_path(data_dir, write_id), record)
+    return record
+
+
+def _token_is_expired(token: dict, *, now: datetime | None = None) -> bool:
+    try:
+        expires_at = datetime.fromisoformat(token["expires_at"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    if expires_at.tzinfo is None:
+        return True
+    now = now or datetime.now(timezone.utc)
+    return expires_at <= now + timedelta(seconds=60)
+
+
+async def refresh_access_token(config, token: dict) -> dict:
+    refresh_token = token.get("refresh_token") if isinstance(token, dict) else None
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise CalendarAuthError("Stored Google Calendar token is invalid")
+    data = {
+        "client_id": config.google_oauth_client_id,
+        "client_secret": config.google_oauth_client_secret,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(OAUTH_TOKEN_URL, data=data) as response:
+                body = await response.json(content_type=None)
+                if response.status != 200:
+                    raise CalendarAuthError("Google Calendar connection must be reconnected")
+    except aiohttp.ClientError as error:
+        raise CalendarAuthError("Google Calendar connection must be reconnected") from error
+    expires_in = body.get("expires_in") if isinstance(body, dict) else None
+    access_token = body.get("access_token") if isinstance(body, dict) else None
+    if (
+        not isinstance(access_token, str) or not access_token
+        or not isinstance(expires_in, int) or isinstance(expires_in, bool) or expires_in <= 0
+    ):
+        raise CalendarAuthError("Google Calendar token refresh failed")
+    refreshed = {**token, "access_token": access_token}
+    refreshed["expires_at"] = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat()
+    return refreshed
+
+
+async def insert_event(token: dict, payload: dict) -> dict:
+    access_token = token.get("access_token") if isinstance(token, dict) else None
+    if not isinstance(access_token, str) or not access_token:
+        raise CalendarAuthError("Stored Google Calendar token is invalid")
+    event_id = payload.get("id") if isinstance(payload, dict) else None
+    if EVENT_ID.fullmatch(event_id or "") is None:
+        raise CalendarPayloadError("Invalid Google Calendar event payload")
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(EVENTS_URL, headers=headers, json=payload) as response:
+                body = await response.json(content_type=None)
+                if response.status == 409:
+                    async with session.get(f"{EVENTS_URL}/{event_id}", headers=headers) as existing:
+                        body = await existing.json(content_type=None)
+                        if existing.status == 200 and (
+                            isinstance(body, dict)
+                            and body.get("id") == event_id
+                            and body.get("extendedProperties", {}).get("private", {}).get("voice_calendar_bot") == "1"
+                        ):
+                            return body
+                    raise CalendarAPIError("Google Calendar event conflict")
+                if response.status not in {200, 201} or not isinstance(body, dict):
+                    raise CalendarAPIError("Google Calendar event creation failed")
+    except aiohttp.ClientError as error:
+        raise CalendarAPIError("Google Calendar event creation failed") from error
+    return body
 
 
 def reminders_for(minutes: list[int]) -> dict:

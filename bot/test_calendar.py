@@ -1,9 +1,11 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from .calendar import (
     CalendarAuthError,
@@ -11,11 +13,16 @@ from .calendar import (
     build_event,
     consume_oauth_state,
     create_authorization_url,
+    create_write,
     disconnect,
+    insert_event,
+    load_write,
     load_token,
     recurrence_to_rrule,
+    refresh_access_token,
     reminders_for,
     save_token,
+    update_write,
 )
 
 
@@ -124,6 +131,75 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertTrue(disconnect(root, 123))
             self.assertIsNone(load_token(root, 123))
+
+
+class TestCalendarWrites(unittest.TestCase):
+    def config(self):
+        return SimpleNamespace(
+            google_oauth_client_id="client-id",
+            google_oauth_client_secret="client-secret",
+        )
+
+    def response(self, status, body):
+        response = MagicMock()
+        response.status = status
+        response.json = AsyncMock(return_value=body)
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=None)
+        return response
+
+    def session(self, post, get=None):
+        session = MagicMock()
+        session.post.return_value = post
+        if get is not None:
+            session.get.return_value = get
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        return session
+
+    def test_write_persists_stable_event_id_and_fingerprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = build_event({
+                "title": "Sync", "start": "2026-09-19T09:00:00+03:00",
+                "all_day": False, "duration_minutes": 60, "location": None,
+                "recurrence": None, "reminders_minutes": [],
+            }, EVENT_ID)
+            record = create_write(Path(directory), 123, "text/123/456/record.json", payload)
+            self.assertEqual(record["status"], "pending")
+            self.assertRegex(record["event_id"], r"^evt[a-v0-9]{29}$")
+            self.assertEqual(load_write(Path(directory), record["write_id"]), record)
+            updated = update_write(
+                Path(directory), record["write_id"], status="creating"
+            )
+            self.assertEqual(updated["event_id"], record["event_id"])
+            self.assertEqual(updated["status"], "creating")
+
+    @patch("bot.calendar.aiohttp.ClientSession")
+    def test_refresh_access_token(self, client_session):
+        session = self.session(self.response(200, {
+            "access_token": "new-access", "expires_in": 3600,
+        }))
+        client_session.return_value = session
+        token = asyncio.run(refresh_access_token(self.config(), {
+            "access_token": "old-access", "refresh_token": "refresh",
+            "expires_at": "2026-09-22T00:00:00+00:00",
+        }))
+        self.assertEqual(token["access_token"], "new-access")
+        self.assertEqual(token["refresh_token"], "refresh")
+
+    @patch("bot.calendar.aiohttp.ClientSession")
+    def test_conflict_retry_uses_matching_existing_event(self, client_session):
+        payload = build_event({
+            "title": "Sync", "start": "2026-09-19T09:00:00+03:00",
+            "all_day": False, "duration_minutes": 60, "location": None,
+            "recurrence": None, "reminders_minutes": [],
+        }, EVENT_ID)
+        existing = {**payload, "htmlLink": "https://calendar.google/event"}
+        client_session.return_value = self.session(
+            self.response(409, {}), self.response(200, existing)
+        )
+        result = asyncio.run(insert_event({"access_token": "access"}, payload))
+        self.assertEqual(result["htmlLink"], "https://calendar.google/event")
 
 
 if __name__ == "__main__":

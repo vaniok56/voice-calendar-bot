@@ -12,6 +12,7 @@ from .calendar import (
     CalendarPayloadError,
     build_event,
     consume_oauth_state,
+    connection_generation,
     create_authorization_url,
     create_write,
     disconnect,
@@ -56,6 +57,11 @@ class TestCalendarPayload(unittest.TestCase):
             start="2026-03-29T00:30:00+02:00", duration_minutes=180
         ), EVENT_ID)
         self.assertEqual(event["end"]["dateTime"], "2026-03-29T04:30:00+03:00")
+
+    def test_timed_event_uses_configured_timezone(self):
+        event = build_event(self.timed(), EVENT_ID, "America/New_York")
+        self.assertEqual(event["start"]["dateTime"], "2026-09-19T02:00:00-04:00")
+        self.assertEqual(event["start"]["timeZone"], "America/New_York")
 
     def test_all_day_event_has_exclusive_end(self):
         event = build_event(self.timed(
@@ -139,6 +145,17 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertTrue(disconnect(root, 123))
             self.assertIsNone(load_token(root, 123))
+
+    def test_disconnect_invalidates_pending_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            url = create_authorization_url(config, 123)
+            state = parse_qs(urlparse(url).query)["state"][0]
+            pending = consume_oauth_state(Path(directory), state)
+            disconnect(Path(directory), 123)
+            self.assertNotEqual(
+                pending["connection_generation"], connection_generation(Path(directory), 123)
+            )
 
 
 class TestCalendarWrites(unittest.TestCase):

@@ -330,6 +330,7 @@ class TestReplyFlow(unittest.TestCase):
             calendar_write_enabled=enabled,
             google_oauth_client_id="client",
             google_oauth_client_secret="secret",
+            google_oauth_redirect_uri="https://calendar.example.com/google/callback",
         )
 
     def calendar_record_path(self, directory):

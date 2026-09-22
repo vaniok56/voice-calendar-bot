@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Bot, Router
 from aiogram.enums import ChatAction
@@ -23,6 +24,7 @@ from ..calendar import (
     _token_is_expired,
     build_event,
     claim_write,
+    connection_generation,
     create_write,
     edit_payload,
     insert_event,
@@ -34,6 +36,7 @@ from ..calendar import (
     replace_write_payload,
     save_token,
     update_write,
+    oauth_is_configured,
 )
 from ..drafts import Draft, apply_answer, next_field
 from ..extraction import extract_event
@@ -177,10 +180,17 @@ async def _execute_calendar_write(config, write: dict) -> dict:
             token = load_token(config.data_dir, write["telegram_user_id"])
             if token is None:
                 raise CalendarAuthError("Google Calendar is not connected")
+            if connection_generation(config.data_dir, write["telegram_user_id"]) != write.get("connection_generation", 0):
+                raise CalendarAuthError("Google Calendar connection changed")
             if _token_is_expired(token):
                 refreshed = await refresh_access_token(config, token)
                 current = load_token(config.data_dir, write["telegram_user_id"])
-                if current is None or current.get("refresh_token") != token.get("refresh_token"):
+                if (
+                    current is None
+                    or current.get("refresh_token") != token.get("refresh_token")
+                    or connection_generation(config.data_dir, write["telegram_user_id"])
+                    != write.get("connection_generation", 0)
+                ):
                     raise CalendarAuthError("Google Calendar connection was removed")
                 token = refreshed
                 save_token(config.data_dir, write["telegram_user_id"], token)
@@ -206,16 +216,17 @@ async def run_extraction(
     deepseek_api_key: str,
     extraction_model: str,
     extraction_timeout: int,
+    zone: ZoneInfo = semantic.ZONE,
 ):
     try:
-        messages = semantic.build_messages(text, reference)
+        messages = semantic.build_messages(text, reference, zone)
         extraction = await extract_event(
             messages,
             api_key=deepseek_api_key,
             model=extraction_model,
             timeout=extraction_timeout,
         )
-        resolved = semantic.resolve(extraction.raw, text, reference)
+        resolved = semantic.resolve(extraction.raw, text, reference, zone)
         return extraction.raw, resolved, extraction.wait_time_seconds, None
     except Exception as error:
         return None, None, None, f"{type(error).__name__}: {error}"
@@ -306,7 +317,7 @@ async def reply_event(
             await _deliver(message, bot, draft, text, None)
             drafts.pop(user_id, None)
             return
-        if config is not None and record_path is not None:
+        if config is not None and record_path is not None and oauth_is_configured(config):
             try:
                 token = load_token(config.data_dir, user_id)
             except CalendarAuthError:
@@ -325,7 +336,8 @@ async def reply_event(
                     resolved, new_google_event_id(), config.calendar_timezone
                 )
                 write = create_write(
-                    config.data_dir, user_id, _source_record(record_path, config), payload
+                    config.data_dir, user_id, _source_record(record_path, config), payload,
+                    connection=connection_generation(config.data_dir, user_id),
                 )
             except CalendarPayloadError as error:
                 await _deliver(
@@ -352,10 +364,11 @@ async def reply_event(
                 if write["status"] == "created":
                     status = "✅ Created"
                 else:
-                    status = "⚠️ Google Calendar creation failed. Reconnect and send again."
+                    status = "⚠️ Google Calendar creation failed. Confirm to retry."
                 await _deliver(
                     message, bot, draft,
-                    _calendar_text(write["payload"], status, write.get("google_html_link")), None,
+                    _calendar_text(write["payload"], status, write.get("google_html_link")),
+                    None if write["status"] == "created" else _calendar_markup(write["write_id"], resolved.get("all_day", False)),
                 )
                 drafts.pop(user_id, None)
                 return
@@ -386,6 +399,7 @@ async def reply_event(
             reference=reference,
             awaiting=field,
             record_path=record_path,
+            timezone=config.calendar_timezone if config is not None else "Europe/Chisinau",
         )
         drafts[user_id] = draft
     elif draft.attempts >= 6:
@@ -430,7 +444,7 @@ async def _answer_draft(
     except ValueError as error:
         draft.attempts += 1
         resolved = semantic.resolve(
-            draft.raw, "\n".join(draft.evidence), draft.reference
+            draft.raw, "\n".join(draft.evidence), draft.reference, ZoneInfo(draft.timezone)
         )
         _update_record(
             draft.record_path,
@@ -504,10 +518,10 @@ async def confirm_calendar_write(callback: CallbackQuery, config) -> None:
         await callback.answer("Already created.")
         return
     if not config.calendar_write_enabled:
-        write = update_write(config.data_dir, write["write_id"], status="shadowed")
         await callback.answer("Google writes are disabled.", show_alert=True)
         await callback.message.edit_text(
-            _calendar_text(write["payload"], "🕶️ Shadowed: Google writes are disabled.")
+            _calendar_text(write["payload"], "🕶️ Google writes are disabled."),
+            reply_markup=_calendar_markup(write["write_id"], "date" in write["payload"]["start"]),
         )
         return
     write = claim_write(config.data_dir, write["write_id"])
@@ -572,6 +586,7 @@ async def choose_calendar_edit(callback: CallbackQuery, config, calendar_edits) 
     await callback.answer()
     await callback.message.edit_text(
         _calendar_text(write["payload"], prompts[field]),
+        reply_markup=_edit_fields_markup(write_id, "date" in write["payload"]["start"]),
     )
 
 
@@ -667,7 +682,7 @@ async def handle_voice(
         await message.answer("Voice message exceeds the 2 MiB limit.")
         return
 
-    received_at = datetime.now(CHISINAU)
+    received_at = datetime.now(ZoneInfo(config.calendar_timezone) if config else CHISINAU)
     record_dir = voice_root / str(user_id) / str(message.message_id)
     try:
         record_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -709,6 +724,7 @@ async def handle_voice(
             deepseek_api_key=deepseek_api_key,
             extraction_model=extraction_model,
             extraction_timeout=extraction_timeout,
+            zone=ZoneInfo(config.calendar_timezone) if config else semantic.ZONE,
         )
         if extraction_error is not None:
             log.error(
@@ -809,7 +825,7 @@ async def handle_text(
         )
         return
 
-    received_at = datetime.now(CHISINAU)
+    received_at = datetime.now(ZoneInfo(config.calendar_timezone) if config else CHISINAU)
     record_dir = text_root / str(user_id) / str(message.message_id)
     try:
         record_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -842,6 +858,7 @@ async def handle_text(
             deepseek_api_key=deepseek_api_key,
             extraction_model=extraction_model,
             extraction_timeout=extraction_timeout,
+            zone=ZoneInfo(config.calendar_timezone) if config else semantic.ZONE,
         )
         record.update(
             status="completed",

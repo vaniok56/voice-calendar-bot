@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 
 from ..calendar import (
     CalendarAuthError,
+    connection_generation,
     consume_oauth_state,
     create_authorization_url,
     disconnect,
@@ -66,9 +67,15 @@ async def google_callback(request: web.Request) -> web.Response:
         if request.query.get("error"):
             return web.Response(text="Google Calendar connection was not completed.", status=400)
         token = await exchange_code(config, request.query.get("code", ""), pending["code_verifier"])
-        if not storage.is_allowed(pending["telegram_user_id"]):
+        if (
+            not storage.is_allowed(pending["telegram_user_id"])
+            or connection_generation(config.data_dir, pending["telegram_user_id"])
+            != pending["connection_generation"]
+        ):
             return web.Response(text="Google Calendar connection could not be completed.", status=400)
-        save_token(config.data_dir, pending["telegram_user_id"], token)
+        save_token(config.data_dir, pending["telegram_user_id"], {
+            **token, "connection_generation": pending["connection_generation"],
+        })
     except CalendarAuthError:
         return web.Response(text="Google Calendar connection could not be completed.", status=400)
     return web.Response(text="Google Calendar connected. Return to Telegram.")

@@ -100,6 +100,29 @@ def _token_path(data_dir: Path, user_id: int) -> Path:
     return _calendar_root(data_dir) / "tokens" / f"{user_id}.json"
 
 
+def _connection_path(data_dir: Path, user_id: int) -> Path:
+    return _calendar_root(data_dir) / "connections" / f"{user_id}.json"
+
+
+def connection_generation(data_dir: Path, user_id: int) -> int:
+    try:
+        value = json.loads(_connection_path(data_dir, user_id).read_text(encoding="utf-8"))
+        generation = value["generation"]
+    except FileNotFoundError:
+        return 0
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise CalendarAuthError("Stored Google Calendar connection is invalid") from error
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
+        raise CalendarAuthError("Stored Google Calendar connection is invalid")
+    return generation
+
+
+def advance_connection(data_dir: Path, user_id: int) -> int:
+    generation = connection_generation(data_dir, user_id) + 1
+    _write_private_json(_connection_path(data_dir, user_id), {"generation": generation})
+    return generation
+
+
 def _code_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -111,10 +134,12 @@ def create_authorization_url(config, user_id: int, *, now: datetime | None = Non
     now = now or datetime.now(timezone.utc)
     _prune_expired_states(config.data_dir, now)
     _clear_user_states(config.data_dir, user_id)
+    generation = advance_connection(config.data_dir, user_id)
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     _write_private_json(_state_path(config.data_dir, state), {
         "telegram_user_id": user_id,
+        "connection_generation": generation,
         "code_verifier": verifier,
         "expires_at": (now + STATE_TTL).isoformat(),
     })
@@ -151,7 +176,14 @@ def consume_oauth_state(data_dir: Path, state: str, *, now: datetime | None = No
         or expires_at.tzinfo is None or expires_at <= now
     ):
         raise CalendarAuthError("OAuth state is expired or invalid")
-    return {"telegram_user_id": user_id, "code_verifier": verifier}
+    generation = value.get("connection_generation")
+    if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+        raise CalendarAuthError("OAuth state is invalid")
+    return {
+        "telegram_user_id": user_id,
+        "code_verifier": verifier,
+        "connection_generation": generation,
+    }
 
 
 async def exchange_code(config, code: str, verifier: str) -> dict:
@@ -171,7 +203,7 @@ async def exchange_code(config, code: str, verifier: str) -> dict:
                 body = await response.json(content_type=None)
                 if response.status != 200:
                     raise CalendarAuthError("OAuth code exchange failed")
-    except (aiohttp.ClientError, json.JSONDecodeError, UnicodeDecodeError) as error:
+    except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise CalendarAuthError("OAuth code exchange failed") from error
     if not isinstance(body, dict) or not isinstance(body.get("access_token"), str):
         raise CalendarAuthError("OAuth code exchange failed")
@@ -211,11 +243,23 @@ def load_token(data_dir: Path, user_id: int) -> dict | None:
 
 def disconnect(data_dir: Path, user_id: int) -> bool:
     _clear_user_states(data_dir, user_id)
+    advance_connection(data_dir, user_id)
     path = _token_path(data_dir, user_id)
     if not path.exists():
         return False
     path.unlink()
     return True
+
+
+def forget_user(data_dir: Path, user_id: int) -> None:
+    disconnect(data_dir, user_id)
+    writes = _calendar_root(data_dir) / "writes"
+    for path in writes.glob("*.json"):
+        try:
+            if json.loads(path.read_text(encoding="utf-8")).get("telegram_user_id") == user_id:
+                path.unlink(missing_ok=True)
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
 
 
 def _write_path(data_dir: Path, write_id: str) -> Path:
@@ -229,7 +273,7 @@ def new_google_event_id() -> str:
 
 
 def create_write(
-    data_dir: Path, user_id: int, source_record: str, payload: dict
+    data_dir: Path, user_id: int, source_record: str, payload: dict, *, connection: int = 0
 ) -> dict:
     if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
         raise CalendarPayloadError("Invalid Telegram user")
@@ -237,6 +281,8 @@ def create_write(
         raise CalendarPayloadError("Calendar write source record is required")
     if not isinstance(payload, dict):
         raise CalendarPayloadError("Calendar event payload is invalid")
+    if not isinstance(connection, int) or isinstance(connection, bool) or connection < 0:
+        raise CalendarPayloadError("Calendar connection is invalid")
     event_id = payload.get("id")
     if EVENT_ID.fullmatch(event_id or "") is None:
         raise CalendarPayloadError("Calendar event payload is invalid")
@@ -244,6 +290,7 @@ def create_write(
     record = {
         "write_id": write_id,
         "telegram_user_id": user_id,
+        "connection_generation": connection,
         "source_record": source_record,
         "event_id": event_id,
         "payload_fingerprint": hashlib.sha256(
@@ -288,7 +335,11 @@ def claim_write(data_dir: Path, write_id: str) -> dict | None:
     if write_id in ACTIVE_WRITES:
         return None
     ACTIVE_WRITES.add(write_id)
-    return update_write(data_dir, write_id, status="creating", error=None)
+    try:
+        return update_write(data_dir, write_id, status="creating", error=None)
+    except Exception:
+        ACTIVE_WRITES.discard(write_id)
+        raise
 
 
 def release_write(write_id: str) -> None:
@@ -311,6 +362,20 @@ def replace_write_payload(data_dir: Path, write_id: str, payload: dict) -> dict:
     )
 
 
+def _local_datetime(day: date, clock, zone: ZoneInfo) -> datetime:
+    naive = datetime.combine(day, clock)
+    candidates = [naive.replace(tzinfo=zone, fold=fold) for fold in (0, 1)]
+    valid = [
+        candidate for candidate in candidates
+        if candidate.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) == naive
+    ]
+    if not valid:
+        raise CalendarPayloadError("Time does not exist in calendar timezone")
+    if len(valid) == 2 and valid[0].utcoffset() != valid[1].utcoffset():
+        raise CalendarPayloadError("Time is ambiguous in calendar timezone")
+    return valid[0]
+
+
 def edit_payload(payload: dict, field: str, value: str, timezone_name: str) -> dict:
     event = deepcopy(payload)
     try:
@@ -323,6 +388,8 @@ def edit_payload(payload: dict, field: str, value: str, timezone_name: str) -> d
         event["summary"] = value.strip()
         return event
     if field == "date":
+        if event.get("recurrence"):
+            raise CalendarPayloadError("Recurring event date cannot be edited")
         try:
             day = date.fromisoformat(value.strip())
         except ValueError as error:
@@ -337,7 +404,7 @@ def edit_payload(payload: dict, field: str, value: str, timezone_name: str) -> d
         except (KeyError, TypeError, ValueError) as error:
             raise CalendarPayloadError("Calendar event payload is invalid") from error
         duration = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
-        start = datetime.combine(day, start.timetz().replace(tzinfo=None), zone)
+        start = _local_datetime(day, start.timetz().replace(tzinfo=None), zone)
         end = (start.astimezone(timezone.utc) + duration).astimezone(zone)
         event["start"]["dateTime"] = start.isoformat()
         event["end"]["dateTime"] = end.isoformat()
@@ -354,8 +421,8 @@ def edit_payload(payload: dict, field: str, value: str, timezone_name: str) -> d
         except (KeyError, TypeError, ValueError) as error:
             raise CalendarPayloadError("Use HH:MM (24-hour time)") from error
         duration = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
-        start = datetime.combine(start.date(), datetime.min.time(), zone).replace(
-            hour=hour, minute=minute
+        start = _local_datetime(
+            start.date(), datetime.min.time().replace(hour=hour, minute=minute), zone
         )
         end = (start.astimezone(timezone.utc) + duration).astimezone(zone)
         event["start"]["dateTime"] = start.isoformat()
@@ -386,12 +453,12 @@ async def refresh_access_token(config, token: dict) -> dict:
         "refresh_token": refresh_token,
     }
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
             async with session.post(OAUTH_TOKEN_URL, data=data) as response:
                 body = await response.json(content_type=None)
                 if response.status != 200:
                     raise CalendarAuthError("Google Calendar connection must be reconnected")
-    except aiohttp.ClientError as error:
+    except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise CalendarAuthError("Google Calendar connection must be reconnected") from error
     expires_in = body.get("expires_in") if isinstance(body, dict) else None
     access_token = body.get("access_token") if isinstance(body, dict) else None
@@ -454,7 +521,7 @@ def reminders_for(minutes: list[int]) -> dict:
 
 
 def recurrence_to_rrule(
-    recurrence: dict, *, timed: bool = False, start: datetime | None = None
+    recurrence: dict, *, timed: bool = False, start: datetime | None = None, zone: ZoneInfo | None = None
 ) -> list[str]:
     frequency = recurrence.get("freq")
     if frequency not in {"daily", "weekly", "monthly", "yearly"}:
@@ -502,7 +569,7 @@ def recurrence_to_rrule(
                 if start is None or start.tzinfo is None:
                     raise ValueError
                 until_value = datetime.combine(
-                    until_day, datetime.max.time(), start.tzinfo
+                    until_day, datetime.max.time(), zone or start.tzinfo
                 ).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             else:
                 until_value = until_day.strftime("%Y%m%d")
@@ -550,9 +617,9 @@ def build_event(
             raise CalendarPayloadError("Timed event start and duration are required") from error
         if start.tzinfo is None or not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
             raise CalendarPayloadError("Timed event start and duration are required")
-        timed_start = start
-        end = (start.astimezone(timezone.utc) + timedelta(minutes=duration)).astimezone(zone)
-        event["start"] = {"dateTime": start.isoformat(), "timeZone": timezone_name}
+        timed_start = start.astimezone(zone)
+        end = (timed_start.astimezone(timezone.utc) + timedelta(minutes=duration)).astimezone(zone)
+        event["start"] = {"dateTime": timed_start.isoformat(), "timeZone": timezone_name}
         event["end"] = {"dateTime": end.isoformat(), "timeZone": timezone_name}
 
     location = resolved.get("location")
@@ -564,7 +631,7 @@ def build_event(
         if not isinstance(recurrence, dict):
             raise CalendarPayloadError("Event recurrence must be an object")
         event["recurrence"] = recurrence_to_rrule(
-            recurrence, timed=timed_start is not None, start=timed_start
+            recurrence, timed=timed_start is not None, start=timed_start, zone=zone
         )
     event["reminders"] = reminders_for(resolved.get("reminders_minutes", []))
     return event

@@ -4,6 +4,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from ..calendar import forget_user
 from ..storage import Storage
 
 
@@ -164,7 +165,7 @@ async def select_user(callback: CallbackQuery, storage: Storage) -> None:
 
 
 @router.callback_query(F.data.startswith(CB_REMOVE))
-async def confirm_remove(callback: CallbackQuery, storage: Storage) -> None:
+async def confirm_remove(callback: CallbackQuery, storage: Storage, config) -> None:
     if not callback.from_user or not storage.is_admin(callback.from_user.id):
         await callback.answer()
         return
@@ -180,6 +181,7 @@ async def confirm_remove(callback: CallbackQuery, storage: Storage) -> None:
 
     removed = storage.remove_user(user_id)
     if removed:
+        forget_user(config.data_dir, user_id)
         log.info("Access changed action=remove_user actor=%s target=%s", callback.from_user.id, user_id)
     text, keyboard = _list_view(storage, page)
     if callback.message:

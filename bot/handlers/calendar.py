@@ -66,6 +66,8 @@ async def google_callback(request: web.Request) -> web.Response:
         if request.query.get("error"):
             return web.Response(text="Google Calendar connection was not completed.", status=400)
         token = await exchange_code(config, request.query.get("code", ""), pending["code_verifier"])
+        if not storage.is_allowed(pending["telegram_user_id"]):
+            return web.Response(text="Google Calendar connection could not be completed.", status=400)
         save_token(config.data_dir, pending["telegram_user_id"], token)
     except CalendarAuthError:
         return web.Response(text="Google Calendar connection could not be completed.", status=400)

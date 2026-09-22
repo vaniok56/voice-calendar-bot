@@ -175,7 +175,11 @@ async def _execute_calendar_write(config, write: dict) -> dict:
             if token is None:
                 raise CalendarAuthError("Google Calendar is not connected")
             if _token_is_expired(token):
-                token = await refresh_access_token(config, token)
+                refreshed = await refresh_access_token(config, token)
+                current = load_token(config.data_dir, write["telegram_user_id"])
+                if current is None or current.get("refresh_token") != token.get("refresh_token"):
+                    raise CalendarAuthError("Google Calendar connection was removed")
+                token = refreshed
                 save_token(config.data_dir, write["telegram_user_id"], token)
             event = await insert_event(token, write["payload"])
         except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:

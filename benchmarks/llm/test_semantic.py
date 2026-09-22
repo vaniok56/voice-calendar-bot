@@ -30,6 +30,11 @@ def empty(**updates):
 class TestSemanticResolver(unittest.TestCase):
     REFERENCE = datetime(2026, 9, 18, 12, 0, tzinfo=semantic.ZONE)
 
+    def test_prompt_classifies_russian_task_intent_as_create(self):
+        self.assertIn(
+            "Мне нужно убрать туалет кота через час", semantic.SYSTEM_PROMPT
+        )
+
     def test_weekday_and_bare_hour(self):
         raw = empty(
             date={

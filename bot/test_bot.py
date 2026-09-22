@@ -313,6 +313,16 @@ class TestReplyFlow(unittest.TestCase):
         callbacks = [button.callback_data for button in markup.inline_keyboard[0]]
         self.assertEqual(callbacks, ["confirm:42", "edit:42", "cancel:42"])
 
+    def test_calendar_edit_selection_has_back_button(self):
+        from .handlers.voice import _edit_fields_markup
+
+        callbacks = [
+            button.callback_data
+            for row in _edit_fields_markup("abc123", False).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("edit_back:abc123", callbacks)
+
     def calendar_config(self, data_dir, enabled):
         return SimpleNamespace(
             data_dir=Path(data_dir),

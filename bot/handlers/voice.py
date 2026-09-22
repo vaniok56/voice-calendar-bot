@@ -149,7 +149,10 @@ def _edit_fields_markup(write_id: str, all_day: bool) -> InlineKeyboardMarkup:
     ]
     if not all_day:
         fields.append(InlineKeyboardButton(text="Time", callback_data=f"edit_field:{write_id}:time"))
-    return InlineKeyboardMarkup(inline_keyboard=[fields])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        fields,
+        [InlineKeyboardButton(text="Back", callback_data=f"edit_back:{write_id}")],
+    ])
 
 
 def _calendar_text(payload: dict, status: str, html_link: str | None = None) -> str:
@@ -569,6 +572,22 @@ async def choose_calendar_edit(callback: CallbackQuery, config, calendar_edits) 
     await callback.answer()
     await callback.message.edit_text(
         _calendar_text(write["payload"], prompts[field]),
+    )
+
+
+@router.callback_query(F.data.startswith("edit_back:"))
+async def cancel_calendar_edit_selection(callback: CallbackQuery, config, calendar_edits) -> None:
+    write = _callback_write(config, callback, "edit_back:")
+    if write is None or write["status"] != "pending":
+        await callback.answer("This Calendar action is no longer available.", show_alert=True)
+        return
+    calendar_edits.pop(callback.from_user.id, None)
+    await callback.answer()
+    await callback.message.edit_text(
+        _calendar_text(write["payload"], "Ready to confirm."),
+        reply_markup=_calendar_markup(
+            write["write_id"], "date" in write["payload"]["start"]
+        ),
     )
 
 

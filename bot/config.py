@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -21,6 +22,12 @@ class Config:
     voice_retention_hours: int
     voice_cleanup_interval_seconds: int
     debug: bool
+    calendar_write_enabled: bool
+    google_oauth_client_id: str
+    google_oauth_client_secret: str
+    google_oauth_redirect_uri: str
+    calendar_callback_port: int
+    calendar_timezone: str
 
 
 def _int_env(name: str, default: str) -> int:
@@ -28,6 +35,13 @@ def _int_env(name: str, default: str) -> int:
         return int(os.environ.get(name, default))
     except ValueError as error:
         raise RuntimeError(f"{name} must be an integer") from error
+
+
+def _bool_env(name: str, default: str = "false") -> bool:
+    value = os.environ.get(name, default).strip().lower()
+    if value not in {"true", "false"}:
+        raise RuntimeError(f"{name} must be true or false")
+    return value == "true"
 
 
 def load_config() -> Config:
@@ -74,7 +88,23 @@ def load_config() -> Config:
     if voice_cleanup_interval_seconds <= 0:
         raise RuntimeError("VOICE_CLEANUP_INTERVAL_SECONDS must be positive")
 
-    debug = os.environ.get("DEBUG", "false").strip().lower() == "true"
+    debug = _bool_env("DEBUG")
+    calendar_write_enabled = _bool_env("CALENDAR_WRITE_ENABLED")
+    calendar_callback_port = _int_env("CALENDAR_CALLBACK_PORT", "8080")
+    if not 1 <= calendar_callback_port <= 65535:
+        raise RuntimeError("CALENDAR_CALLBACK_PORT must be between 1 and 65535")
+    calendar_timezone = os.environ.get("CALENDAR_TIMEZONE", "Europe/Chisinau").strip()
+    try:
+        ZoneInfo(calendar_timezone)
+    except ZoneInfoNotFoundError as error:
+        raise RuntimeError("CALENDAR_TIMEZONE must be an IANA timezone") from error
+    google_oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    google_oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    google_oauth_redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if calendar_write_enabled and not all((
+        google_oauth_client_id, google_oauth_client_secret, google_oauth_redirect_uri,
+    )):
+        raise RuntimeError("Google OAuth configuration is required when CALENDAR_WRITE_ENABLED=true")
 
     return Config(
         bot_token=token,
@@ -91,4 +121,10 @@ def load_config() -> Config:
         voice_retention_hours=voice_retention_hours,
         voice_cleanup_interval_seconds=voice_cleanup_interval_seconds,
         debug=debug,
+        calendar_write_enabled=calendar_write_enabled,
+        google_oauth_client_id=google_oauth_client_id,
+        google_oauth_client_secret=google_oauth_client_secret,
+        google_oauth_redirect_uri=google_oauth_redirect_uri,
+        calendar_callback_port=calendar_callback_port,
+        calendar_timezone=calendar_timezone,
     )

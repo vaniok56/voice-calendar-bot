@@ -17,3 +17,13 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["calendar"]
+    depends_on:
+      - bot
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CALENDAR_TUNNEL_TOKEN:-}"

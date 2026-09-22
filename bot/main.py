@@ -2,12 +2,14 @@ import asyncio
 import logging
 import os
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from . import calendar as calendar_service
 from .config import Config, load_config
-from .handlers import admin, start, voice
+from .handlers import admin, calendar, start, voice
 from .logging_config import configure_logging
 from .middleware import AllowlistMiddleware
 from .retention import retention_loop
@@ -35,6 +37,7 @@ async def main_async(config: Config) -> None:
     dispatcher.message.middleware(AllowlistMiddleware(storage))
     dispatcher.callback_query.middleware(AllowlistMiddleware(storage))
     dispatcher.include_router(admin.router)
+    dispatcher.include_router(calendar.router)
     dispatcher.include_router(start.router)
     dispatcher.include_router(voice.router)
 
@@ -44,8 +47,15 @@ async def main_async(config: Config) -> None:
     text_cleanup_task = asyncio.create_task(
         retention_loop(text_root, config.voice_cleanup_interval_seconds)
     )
+    callback_runner = None
 
     try:
+        if calendar_service.oauth_is_configured(config):
+            callback_runner = web.AppRunner(calendar.callback_app(config, storage))
+            await callback_runner.setup()
+            await web.TCPSite(
+                callback_runner, "0.0.0.0", config.calendar_callback_port
+            ).start()
         log.info(
             "Bot starting owner=%s model=%s extraction=%s",
             config.owner_id,
@@ -56,6 +66,7 @@ async def main_async(config: Config) -> None:
             bot,
             storage=storage,
             drafts={},
+            calendar_edits={},
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.elevenlabs_model,
             deepseek_api_key=config.deepseek_api_key,
@@ -65,12 +76,15 @@ async def main_async(config: Config) -> None:
             text_root=text_root,
             voice_retention_hours=config.voice_retention_hours,
             debug=config.debug,
+            config=config,
         )
     finally:
         log.info("Bot stopping")
         cleanup_task.cancel()
         text_cleanup_task.cancel()
         await asyncio.gather(cleanup_task, text_cleanup_task, return_exceptions=True)
+        if callback_runner is not None:
+            await callback_runner.cleanup()
         await bot.session.close()
 
 

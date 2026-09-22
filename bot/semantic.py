@@ -130,7 +130,7 @@ SYSTEM_PROMPT = """Convert one message into semantic calendar JSON. Runtime cont
 
 Understand Romanian, Russian, English, mixed speech, ASR noise, fillers, distractors, and corrections. Return source spans exactly as written. Never translate, repair ASR, fix grammar, change inflection, remove stutters inside names, or reconstruct lost words. Use operation unknown when calendar intent is not recoverable.
 
-operation must be exactly create or unknown. This bot only creates events. Use create for a recoverable create request and unknown for edits, deletes, lists, unrelated text, or unsupported intent. Ignore clipped command noise when the remaining message clearly requests a new event. event_type must be exactly one of meeting, appointment, class, exam, call, trip, birthday, reminder, task, other. Use meeting for a scheduled team or group sync, call for a direct call, class for lessons, labs, courses, and academic competitions, and trip for travel, journeys, excursions, or walks/outings at a named place.
+operation must be exactly create or unknown. This bot only creates events. Use create for a recoverable create request and unknown for edits, deletes, lists, unrelated text, or unsupported intent. Imperative tasks and statements of personal intent are create requests: "Почистить туалет кота через час" and "Мне нужно убрать туалет кота через час" both create a task. Ignore clipped command noise when the remaining message clearly requests a new event. event_type must be exactly one of meeting, appointment, class, exam, call, trip, birthday, reminder, task, other. Use meeting for a scheduled team or group sync, call for a direct call, class for lessons, labs, courses, and academic competitions, and trip for travel, journeys, excursions, or walks/outings at a named place.
 
 Date kinds: absolute uses numeric year/month/day; relative uses numeric offsets; weekday uses Monday=0, Tuesday=1, Wednesday=2, Thursday=3, Friday=4, Saturday=5, Sunday=6; none means absent or unsupported. Apply this mapping to weekday names in every language. Do not calculate final dates.
 
@@ -150,8 +150,8 @@ recurrence is null or: source, freq, interval, weekdays, month_day, month, posit
 Each reminders item: source, minutes. title, location, and duration_source are exact source strings or null, never objects. duration_minutes is integer minutes or null, never an object."""
 
 
-def build_messages(text: str, reference: datetime) -> list[dict]:
-    context = reference.astimezone(ZONE).isoformat() if reference.tzinfo else reference.replace(tzinfo=ZONE).isoformat()
+def build_messages(text: str, reference: datetime, zone: ZoneInfo = ZONE) -> list[dict]:
+    context = reference.astimezone(zone).isoformat() if reference.tzinfo else reference.replace(tzinfo=zone).isoformat()
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Reference local datetime: {context}\nMessage: {text}"},
@@ -344,13 +344,13 @@ def _resolve_time(spec: dict, errors: list[str]) -> tuple[int, int] | None:
     return divmod(total, 60)
 
 
-def _local_datetime(day: date, clock: tuple[int, int], risks: list[str]) -> datetime:
+def _local_datetime(day: date, clock: tuple[int, int], risks: list[str], zone: ZoneInfo) -> datetime:
     naive = datetime.combine(day, time(*clock))
-    first = naive.replace(tzinfo=ZONE, fold=0)
-    second = naive.replace(tzinfo=ZONE, fold=1)
+    first = naive.replace(tzinfo=zone, fold=0)
+    second = naive.replace(tzinfo=zone, fold=1)
     valid = []
     for candidate in (first, second):
-        roundtrip = candidate.astimezone(timezone.utc).astimezone(ZONE).replace(tzinfo=None)
+        roundtrip = candidate.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None)
         if roundtrip == naive:
             valid.append(candidate)
     if not valid:
@@ -425,14 +425,16 @@ def _first_recurrence_date(recurrence: dict, reference: date, errors: list[str])
     return None
 
 
-def resolve(raw: dict, transcript: str, reference: datetime | date | None = None) -> dict:
+def resolve(
+    raw: dict, transcript: str, reference: datetime | date | None = None, zone: ZoneInfo = ZONE
+) -> dict:
     """Resolve semantic components without parsing natural language."""
     if reference is None:
-        reference_dt = datetime.now(ZONE)
+        reference_dt = datetime.now(zone)
     elif isinstance(reference, datetime):
-        reference_dt = reference.astimezone(ZONE) if reference.tzinfo else reference.replace(tzinfo=ZONE)
+        reference_dt = reference.astimezone(zone) if reference.tzinfo else reference.replace(tzinfo=zone)
     else:
-        reference_dt = datetime.combine(reference, time(), tzinfo=ZONE)
+        reference_dt = datetime.combine(reference, time(), tzinfo=zone)
 
     errors: list[str] = []
     risks: list[str] = []
@@ -556,7 +558,7 @@ def resolve(raw: dict, transcript: str, reference: datetime | date | None = None
         errors.append("all_day_with_time")
     start = None
     if day is not None and (clock is not None or all_day):
-        start = _local_datetime(day, clock or (0, 0), risks)
+        start = _local_datetime(day, clock or (0, 0), risks, zone)
 
     duration = raw.get("duration_minutes")
     if duration is not None and (not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0):
@@ -569,7 +571,7 @@ def resolve(raw: dict, transcript: str, reference: datetime | date | None = None
         risks.append("ungrounded_duration")
     end_clock = _resolve_time(end_time_spec, errors)
     if end_clock and start:
-        end = _local_datetime(day, end_clock, risks)
+        end = _local_datetime(day, end_clock, risks, zone)
         if end <= start:
             end += timedelta(days=1)
         if duration is None:

@@ -17,7 +17,9 @@ START_TEXT = (
     "Maximum voice size: 2 MiB\n"
     "Retention: up to 7 days\n\n"
     "/start - show this message\n"
-    "/help - show this message"
+    "/help - show this message\n"
+    "/connect_calendar - connect your Google Calendar\n"
+    "/disconnect_calendar - remove your Google Calendar connection"
 )
 
 

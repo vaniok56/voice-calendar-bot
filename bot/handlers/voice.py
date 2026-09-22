@@ -30,6 +30,7 @@ from ..calendar import (
     load_write,
     new_google_event_id,
     refresh_access_token,
+    release_write,
     replace_write_payload,
     save_token,
     update_write,
@@ -169,23 +170,26 @@ def _calendar_text(payload: dict, status: str, html_link: str | None = None) -> 
 async def _execute_calendar_write(config, write: dict) -> dict:
     write_id = write["write_id"]
     try:
-        token = load_token(config.data_dir, write["telegram_user_id"])
-        if token is None:
-            raise CalendarAuthError("Google Calendar is not connected")
-        if _token_is_expired(token):
-            token = await refresh_access_token(config, token)
-            save_token(config.data_dir, write["telegram_user_id"], token)
-        event = await insert_event(token, write["payload"])
-    except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:
-        return update_write(config.data_dir, write_id, status="failed", error=str(error))
-    return update_write(
-        config.data_dir,
-        write_id,
-        status="created",
-        google_event_id=event.get("id"),
-        google_html_link=event.get("htmlLink"),
-        error=None,
-    )
+        try:
+            token = load_token(config.data_dir, write["telegram_user_id"])
+            if token is None:
+                raise CalendarAuthError("Google Calendar is not connected")
+            if _token_is_expired(token):
+                token = await refresh_access_token(config, token)
+                save_token(config.data_dir, write["telegram_user_id"], token)
+            event = await insert_event(token, write["payload"])
+        except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:
+            return update_write(config.data_dir, write_id, status="failed", error=str(error))
+        return update_write(
+            config.data_dir,
+            write_id,
+            status="created",
+            google_event_id=event.get("id"),
+            google_html_link=event.get("htmlLink"),
+            error=None,
+        )
+    finally:
+        release_write(write_id)
 
 
 async def run_extraction(
@@ -291,6 +295,10 @@ async def reply_event(
     field = next_field(resolved)
     if field is None:
         text = format_resolved(resolved)
+        if resolved.get("operation") != "create":
+            await _deliver(message, bot, draft, text, None)
+            drafts.pop(user_id, None)
+            return
         if config is not None and record_path is not None:
             try:
                 token = load_token(config.data_dir, user_id)
@@ -504,8 +512,14 @@ async def confirm_calendar_write(callback: CallbackQuery, config) -> None:
     if write["status"] == "created":
         text = _calendar_text(write["payload"], "✅ Created", write.get("google_html_link"))
     else:
-        text = _calendar_text(write["payload"], "⚠️ Google Calendar creation failed.")
-    await callback.message.edit_text(text)
+        text = _calendar_text(write["payload"], "⚠️ Google Calendar creation failed. Confirm to retry.")
+    await callback.message.edit_text(
+        text,
+        reply_markup=(
+            None if write["status"] == "created"
+            else _calendar_markup(write["write_id"], "date" in write["payload"]["start"])
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("edit:"))
@@ -572,7 +586,11 @@ async def _answer_calendar_edit(message, bot, calendar_edits, config) -> None:
         return
     try:
         write = load_write(config.data_dir, pending["write_id"])
-        if write is None or write["telegram_user_id"] != message.from_user.id:
+        if (
+            write is None or write["telegram_user_id"] != message.from_user.id
+            or write["status"] != "pending"
+        ):
+            calendar_edits.pop(message.from_user.id, None)
             raise CalendarPayloadError("Calendar write was not found")
         payload = edit_payload(
             write["payload"], pending["field"], message.text, config.calendar_timezone

@@ -87,6 +87,13 @@ class TestCalendarPayload(unittest.TestCase):
         self.assertEqual(recurrence_to_rrule({
             "freq": "yearly", "month": 3, "month_day": 8,
         }), ["RRULE:FREQ=YEARLY;INTERVAL=1;BYMONTH=3;BYMONTHDAY=8"])
+        self.assertEqual(recurrence_to_rrule(
+            {"freq": "weekly", "until": "2026-10-01"},
+            timed=True,
+            start=datetime.fromisoformat("2026-09-19T09:00:00+03:00"),
+        ), ["RRULE:FREQ=WEEKLY;INTERVAL=1;UNTIL=20261001T205959Z"])
+        with self.assertRaises(CalendarPayloadError):
+            recurrence_to_rrule({"freq": "weekly", "count": 2, "until": "2026-10-01"})
 
     def test_rejects_invalid_event_id(self):
         with self.assertRaises(CalendarPayloadError):

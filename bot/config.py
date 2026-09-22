@@ -98,6 +98,13 @@ def load_config() -> Config:
         ZoneInfo(calendar_timezone)
     except ZoneInfoNotFoundError as error:
         raise RuntimeError("CALENDAR_TIMEZONE must be an IANA timezone") from error
+    google_oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+    google_oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+    google_oauth_redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    if calendar_write_enabled and not all((
+        google_oauth_client_id, google_oauth_client_secret, google_oauth_redirect_uri,
+    )):
+        raise RuntimeError("Google OAuth configuration is required when CALENDAR_WRITE_ENABLED=true")
 
     return Config(
         bot_token=token,
@@ -115,9 +122,9 @@ def load_config() -> Config:
         voice_cleanup_interval_seconds=voice_cleanup_interval_seconds,
         debug=debug,
         calendar_write_enabled=calendar_write_enabled,
-        google_oauth_client_id=os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip(),
-        google_oauth_client_secret=os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip(),
-        google_oauth_redirect_uri=os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip(),
+        google_oauth_client_id=google_oauth_client_id,
+        google_oauth_client_secret=google_oauth_client_secret,
+        google_oauth_redirect_uri=google_oauth_redirect_uri,
         calendar_callback_port=calendar_callback_port,
         calendar_timezone=calendar_timezone,
     )

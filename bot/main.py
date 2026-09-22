@@ -51,7 +51,7 @@ async def main_async(config: Config) -> None:
 
     try:
         if calendar_service.oauth_is_configured(config):
-            callback_runner = web.AppRunner(calendar.callback_app(config))
+            callback_runner = web.AppRunner(calendar.callback_app(config, storage))
             await callback_runner.setup()
             await web.TCPSite(
                 callback_runner, "0.0.0.0", config.calendar_callback_port

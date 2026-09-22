@@ -22,6 +22,8 @@ OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 STATE_TTL = timedelta(minutes=10)
 WRITE_ID = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
+HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5)
+ACTIVE_WRITES: set[str] = set()
 
 
 class CalendarPayloadError(ValueError):
@@ -69,6 +71,29 @@ def _state_path(data_dir: Path, state: str) -> Path:
     return _calendar_root(data_dir) / "states" / f"{state}.json"
 
 
+def _clear_user_states(data_dir: Path, user_id: int) -> None:
+    states = _calendar_root(data_dir) / "states"
+    for path in states.glob("*.json"):
+        try:
+            if json.loads(path.read_text(encoding="utf-8")).get("telegram_user_id") == user_id:
+                path.unlink(missing_ok=True)
+        except (OSError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+
+
+def _prune_expired_states(data_dir: Path, now: datetime) -> None:
+    states = _calendar_root(data_dir) / "states"
+    for path in states.glob("*.json"):
+        try:
+            expires_at = datetime.fromisoformat(
+                json.loads(path.read_text(encoding="utf-8"))["expires_at"]
+            )
+            if expires_at.tzinfo is None or expires_at <= now:
+                path.unlink(missing_ok=True)
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            path.unlink(missing_ok=True)
+
+
 def _token_path(data_dir: Path, user_id: int) -> Path:
     if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
         raise CalendarAuthError("Invalid Telegram user")
@@ -84,6 +109,8 @@ def create_authorization_url(config, user_id: int, *, now: datetime | None = Non
     if not oauth_is_configured(config):
         raise CalendarAuthError("Google OAuth is not configured")
     now = now or datetime.now(timezone.utc)
+    _prune_expired_states(config.data_dir, now)
+    _clear_user_states(config.data_dir, user_id)
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     _write_private_json(_state_path(config.data_dir, state), {
@@ -139,12 +166,12 @@ async def exchange_code(config, code: str, verifier: str) -> dict:
         "code_verifier": verifier,
     }
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
             async with session.post(OAUTH_TOKEN_URL, data=data) as response:
                 body = await response.json(content_type=None)
                 if response.status != 200:
                     raise CalendarAuthError("OAuth code exchange failed")
-    except aiohttp.ClientError as error:
+    except (aiohttp.ClientError, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise CalendarAuthError("OAuth code exchange failed") from error
     if not isinstance(body, dict) or not isinstance(body.get("access_token"), str):
         raise CalendarAuthError("OAuth code exchange failed")
@@ -183,6 +210,7 @@ def load_token(data_dir: Path, user_id: int) -> dict | None:
 
 
 def disconnect(data_dir: Path, user_id: int) -> bool:
+    _clear_user_states(data_dir, user_id)
     path = _token_path(data_dir, user_id)
     if not path.exists():
         return False
@@ -257,7 +285,14 @@ def claim_write(data_dir: Path, write_id: str) -> dict | None:
     record = load_write(data_dir, write_id)
     if record is None or record.get("status") not in {"pending", "creating", "failed"}:
         return None
+    if write_id in ACTIVE_WRITES:
+        return None
+    ACTIVE_WRITES.add(write_id)
     return update_write(data_dir, write_id, status="creating", error=None)
+
+
+def release_write(write_id: str) -> None:
+    ACTIVE_WRITES.discard(write_id)
 
 
 def replace_write_payload(data_dir: Path, write_id: str, payload: dict) -> dict:
@@ -381,7 +416,7 @@ async def insert_event(token: dict, payload: dict) -> dict:
         raise CalendarPayloadError("Invalid Google Calendar event payload")
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
             async with session.post(EVENTS_URL, headers=headers, json=payload) as response:
                 body = await response.json(content_type=None)
                 if response.status == 409:
@@ -396,7 +431,7 @@ async def insert_event(token: dict, payload: dict) -> dict:
                     raise CalendarAPIError("Google Calendar event conflict")
                 if response.status not in {200, 201} or not isinstance(body, dict):
                     raise CalendarAPIError("Google Calendar event creation failed")
-    except aiohttp.ClientError as error:
+    except (aiohttp.ClientError, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise CalendarAPIError("Google Calendar event creation failed") from error
     return body
 
@@ -418,7 +453,9 @@ def reminders_for(minutes: list[int]) -> dict:
     }
 
 
-def recurrence_to_rrule(recurrence: dict) -> list[str]:
+def recurrence_to_rrule(
+    recurrence: dict, *, timed: bool = False, start: datetime | None = None
+) -> list[str]:
     frequency = recurrence.get("freq")
     if frequency not in {"daily", "weekly", "monthly", "yearly"}:
         raise CalendarPayloadError("Unsupported recurrence frequency")
@@ -456,9 +493,20 @@ def recurrence_to_rrule(recurrence: dict) -> list[str]:
         parts.append(f"{label}={value}")
 
     until = recurrence.get("until")
+    if until is not None and recurrence.get("count") is not None:
+        raise CalendarPayloadError("Recurrence cannot have both count and until")
     if until is not None:
         try:
-            parts.append("UNTIL=" + date.fromisoformat(until).strftime("%Y%m%d"))
+            until_day = date.fromisoformat(until)
+            if timed:
+                if start is None or start.tzinfo is None:
+                    raise ValueError
+                until_value = datetime.combine(
+                    until_day, datetime.max.time(), start.tzinfo
+                ).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            else:
+                until_value = until_day.strftime("%Y%m%d")
+            parts.append("UNTIL=" + until_value)
         except (TypeError, ValueError) as error:
             raise CalendarPayloadError("Invalid recurrence until date") from error
     return ["RRULE:" + ";".join(parts)]
@@ -483,6 +531,7 @@ def build_event(
         "extendedProperties": {"private": {"voice_calendar_bot": "1"}},
     }
     recurrence = resolved.get("recurrence")
+    timed_start = None
     if resolved.get("all_day"):
         try:
             start = date.fromisoformat(resolved["date"])
@@ -501,6 +550,7 @@ def build_event(
             raise CalendarPayloadError("Timed event start and duration are required") from error
         if start.tzinfo is None or not isinstance(duration, int) or isinstance(duration, bool) or duration <= 0:
             raise CalendarPayloadError("Timed event start and duration are required")
+        timed_start = start
         end = (start.astimezone(timezone.utc) + timedelta(minutes=duration)).astimezone(zone)
         event["start"] = {"dateTime": start.isoformat(), "timeZone": timezone_name}
         event["end"] = {"dateTime": end.isoformat(), "timeZone": timezone_name}
@@ -513,6 +563,8 @@ def build_event(
     if recurrence:
         if not isinstance(recurrence, dict):
             raise CalendarPayloadError("Event recurrence must be an object")
-        event["recurrence"] = recurrence_to_rrule(recurrence)
+        event["recurrence"] = recurrence_to_rrule(
+            recurrence, timed=timed_start is not None, start=timed_start
+        )
     event["reminders"] = reminders_for(resolved.get("reminders_minutes", []))
     return event

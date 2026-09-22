@@ -101,3 +101,5 @@ Set `HOST_UID` and `HOST_GID` in `.env` when bind-mounted directories belong to 
 5. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, and `CALENDAR_TUNNEL_TOKEN` in Reactor `.env`. Keep secrets, authorization codes, and token files out of Git and logs.
 6. Deploy tunnel with `docker compose --profile calendar up --build -d`. No host port mapping is needed.
 7. Leave `CALENDAR_WRITE_ENABLED=false`; connect Gmail with `/connect_calendar`, create events in Romanian, Russian, English, and mixed speech, then inspect `data/google-calendar/writes/`. Enable only after review.
+
+Testing OAuth clients can require users to reconnect every seven days. Publish the External consent screen before production use; Calendar scopes may require Google verification.

@@ -55,11 +55,14 @@ async def disconnect_calendar(message: Message, config) -> None:
 
 async def google_callback(request: web.Request) -> web.Response:
     config = request.app["config"]
+    storage = request.app["storage"]
     state = request.query.get("state")
     if not state:
         return web.Response(text="Google Calendar connection could not be completed.", status=400)
     try:
         pending = consume_oauth_state(config.data_dir, state)
+        if not storage.is_allowed(pending["telegram_user_id"]):
+            return web.Response(text="Google Calendar connection could not be completed.", status=400)
         if request.query.get("error"):
             return web.Response(text="Google Calendar connection was not completed.", status=400)
         token = await exchange_code(config, request.query.get("code", ""), pending["code_verifier"])
@@ -69,8 +72,9 @@ async def google_callback(request: web.Request) -> web.Response:
     return web.Response(text="Google Calendar connected. Return to Telegram.")
 
 
-def callback_app(config) -> web.Application:
+def callback_app(config, storage) -> web.Application:
     app = web.Application()
     app["config"] = config
+    app["storage"] = storage
     app.router.add_get("/google/callback", google_callback)
     return app

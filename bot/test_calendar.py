@@ -17,6 +17,7 @@ from .calendar import (
     connection_generation,
     create_authorization_url,
     create_write,
+    cancel_oauth_state,
     disconnect,
     disconnect_and_revoke,
     edit_payload,
@@ -25,6 +26,7 @@ from .calendar import (
     insert_event,
     load_write,
     load_token,
+    pending_connection,
     recurrence_to_rrule,
     refresh_access_token,
     reminders_for,
@@ -33,7 +35,7 @@ from .calendar import (
     update_write,
 )
 from .handlers.calendar import (
-    connect_calendar,
+    cancel_connect,
     connect_calendar_button,
     disconnect_calendar_button,
     google_callback,
@@ -127,27 +129,50 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             google_oauth_client_id="client-id",
             google_oauth_client_secret="client-secret",
             google_oauth_redirect_uri="https://calendar.example.com/google/callback",
+            calendar_timezone="Europe/Chisinau",
         )
 
-    @patch("bot.handlers.calendar.create_authorization_url", return_value="https://accounts.google.com/oauth?state=opaque")
-    def test_connect_replies_with_url_button_without_visible_link(self, create_url):
-        message = MagicMock()
-        message.from_user.id = 123
-        message.answer = AsyncMock()
+    def test_connect_and_cancel_delete_link_and_invalidate_state(self):
         callback = MagicMock()
         callback.from_user.id = 123
         callback.answer = AsyncMock()
         callback.message.answer = AsyncMock()
-        config = self.config(".")
-        asyncio.run(connect_calendar(message, config))
-        asyncio.run(connect_calendar_button(callback, config))
-        self.assertEqual(create_url.call_count, 2)
-        for reply in (message.answer, callback.message.answer):
-            text = reply.await_args.args[0]
-            button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+        callback.message.delete = AsyncMock()
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            asyncio.run(connect_calendar_button(callback, config))
+            text = callback.message.answer.await_args.args[0]
+            markup = callback.message.answer.await_args.kwargs["reply_markup"]
+            button = markup.inline_keyboard[0][0]
             self.assertNotIn("https://", text)
-            self.assertEqual(button.url, "https://accounts.google.com/oauth?state=opaque")
+            self.assertTrue(button.url.startswith("https://accounts.google.com/"))
             self.assertIsNone(button.callback_data)
+            cancel_data = markup.inline_keyboard[1][0].callback_data
+            self.assertLessEqual(len(cancel_data.encode()), 64)
+            state = cancel_data.removeprefix("cancel_connect:")
+            self.assertEqual(parse_qs(urlparse(button.url).query)["state"], [state])
+            callback.data = cancel_data
+            callback.from_user.id = 999
+            asyncio.run(cancel_connect(callback, config))
+            callback.message.delete.assert_not_awaited()
+            callback.from_user.id = 123
+            asyncio.run(cancel_connect(callback, config))
+            callback.message.delete.assert_awaited_once()
+            self.assertFalse(pending_connection(config.data_dir, 123, state))
+            with self.assertRaises(CalendarAuthError):
+                consume_oauth_state(config.data_dir, state)
+
+    def test_cancel_switch_keeps_existing_connection_usable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            save_token(config.data_dir, 123, {"connection_generation": 0}, TOKEN_KEY)
+            state = parse_qs(urlparse(create_authorization_url(config, 123)).query)["state"][0]
+            self.assertEqual(connection_generation(config.data_dir, 123), 0)
+            self.assertTrue(pending_connection(config.data_dir, 123, state))
+            self.assertTrue(cancel_oauth_state(config.data_dir, state, 123))
+            self.assertEqual(connection_generation(config.data_dir, 123), 0)
+            self.assertFalse(pending_connection(config.data_dir, 123, state))
+            self.assertEqual(load_token(config.data_dir, 123, TOKEN_KEY)["connection_generation"], 0)
 
     def test_state_is_single_use_and_tied_to_user(self):
         now = datetime(2026, 9, 22, tzinfo=timezone.utc)
@@ -206,8 +231,9 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             pending = consume_oauth_state(Path(directory), state)
             disconnect(Path(directory), 123)
             self.assertNotEqual(
-                pending["connection_generation"], connection_generation(Path(directory), 123)
+                pending["connection_generation"] - 1, connection_generation(Path(directory), 123)
             )
+            self.assertFalse(pending_connection(Path(directory), 123, state))
 
     def test_legacy_token_requires_reconnect(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,6 +338,52 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             self.assertEqual(token["account_email"], "user@example.com")
             self.assertEqual(token["connection_generation"], connection_generation(config.data_dir, 123))
 
+    @patch("bot.handlers.calendar.fetch_account_email", new_callable=AsyncMock)
+    @patch("bot.handlers.calendar.exchange_code", new_callable=AsyncMock)
+    def test_cancel_during_callback_does_not_replace_existing_account(self, exchange, email):
+        exchange.return_value = {"access_token": "new", "refresh_token": "new"}
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            save_token(config.data_dir, 123, {"access_token": "old", "connection_generation": 0}, TOKEN_KEY)
+            state = parse_qs(urlparse(create_authorization_url(config, 123)).query)["state"][0]
+
+            async def cancel_during_lookup(_access_token):
+                self.assertTrue(cancel_oauth_state(config.data_dir, state, 123))
+                return "new@example.com"
+
+            email.side_effect = cancel_during_lookup
+            request = SimpleNamespace(
+                app={"config": config, "storage": SimpleNamespace(is_allowed=lambda user_id: True)},
+                query={"state": state, "code": "code"},
+            )
+            self.assertEqual(asyncio.run(google_callback(request)).status, 400)
+            self.assertEqual(load_token(config.data_dir, 123, TOKEN_KEY)["access_token"], "old")
+
+    @patch("bot.handlers.calendar.fetch_account_email", new_callable=AsyncMock)
+    @patch("bot.handlers.calendar.exchange_code", new_callable=AsyncMock)
+    def test_new_link_invalidates_callback_already_in_progress(self, exchange, email):
+        exchange.return_value = {"access_token": "new", "refresh_token": "new"}
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            state = parse_qs(urlparse(create_authorization_url(config, 123)).query)["state"][0]
+            replacement = None
+
+            async def replace_during_lookup(_access_token):
+                nonlocal replacement
+                replacement = parse_qs(urlparse(create_authorization_url(config, 123)).query)["state"][0]
+                return "new@example.com"
+
+            email.side_effect = replace_during_lookup
+            request = SimpleNamespace(
+                app={"config": config, "storage": SimpleNamespace(is_allowed=lambda user_id: True)},
+                query={"state": state, "code": "code"},
+            )
+            self.assertEqual(asyncio.run(google_callback(request)).status, 400)
+            self.assertTrue(pending_connection(config.data_dir, 123, replacement))
+            self.assertIsNone(load_token(config.data_dir, 123, TOKEN_KEY))
+
     def test_settings_reports_connection_status_and_timezone(self):
         with tempfile.TemporaryDirectory() as directory:
             config = self.config(directory)
@@ -322,9 +394,11 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             message.answer = AsyncMock()
             asyncio.run(settings(message, config))
             self.assertIn("Not connected", message.answer.await_args.args[0])
+            self.assertEqual(message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text, "Connect")
             save_token(config.data_dir, 123, {"access_token": "legacy"}, TOKEN_KEY)
             asyncio.run(settings(message, config))
             self.assertIn("Reconnect required", message.answer.await_args.args[0])
+            self.assertEqual(message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text, "Reconnect")
             save_token(config.data_dir, 123, {
                 "schema_version": 2, "account_email": "user@example.com", "refresh_token": "refresh",
                 "connection_generation": 0, "access_token": "access",
@@ -334,6 +408,7 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             self.assertIn("Connected: user@example.com", message.answer.await_args.args[0])
             self.assertIn("Europe/Chisinau", message.answer.await_args.args[0])
             buttons = message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+            self.assertEqual(buttons[0][0].text, "Switch account")
             self.assertIn("disconnect_calendar", [button.callback_data for row in buttons for button in row])
 
     @patch("bot.calendar.aiohttp.ClientSession")
@@ -349,7 +424,10 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             callback.message.edit_text = AsyncMock()
             asyncio.run(disconnect_calendar_button(callback, config))
             self.assertIsNone(load_token(config.data_dir, 123, TOKEN_KEY))
-            callback.message.edit_text.assert_awaited_once_with("Google Calendar disconnected.")
+            text = callback.message.edit_text.await_args.args[0]
+            self.assertIn("Not connected", text)
+            buttons = callback.message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+            self.assertEqual(buttons[0][0].text, "Connect")
 
 
 class TestCalendarWrites(unittest.TestCase):

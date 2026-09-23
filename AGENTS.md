@@ -61,7 +61,7 @@ Drafts and edit state are process-local. Restarting bot clears them. Durable rec
 
 ## User Interfaces
 
-Allowed users can use `/start`, `/help`, `/settings`, `/connect_calendar`, `/disconnect_calendar`, plain text, and Telegram voice. `/settings` currently shows Calendar connection/email and the global timezone; profile controls arrive in Branch 2.
+Allowed users can use `/start`, `/help`, `/settings`, plain text, and Telegram voice. `/settings` currently shows Calendar connection/email, the global timezone, and inline Connect/Reconnect/Switch account/Disconnect controls; profile controls arrive in Branch 2. OAuth link messages have a Cancel button that deletes the message and pending state. Old connect/disconnect commands are not registered; slash commands do not enter the extraction handler.
 
 Admins also use `/admin_help`, `/list_users`, `/adduser <user_id>`. Owner alone can use `/add_admin <user_id>` and `/rm_admin <user_id>`.
 
@@ -112,6 +112,7 @@ Calendar OAuth is per Telegram user. Scopes are `calendar.events.owned`, `openid
 
 - State is random, private, single-use, and expires after ten minutes.
 - Each user has durable `connection_generation`.
+- Starting OAuth keeps current connection active; pending state records intended next generation. Only verified callback advances generation. Cancel clears pending state and leaves old connection usable.
 - Disconnect attempts refresh-token revocation with a short timeout after removing local credentials; user removal uses the same path.
 - Connecting, reconnecting, or disconnecting advances generation.
 - Callback verifies user still has access and generation matches before saving token.

@@ -143,6 +143,18 @@ def advance_connection(data_dir: Path, user_id: int) -> int:
     return generation
 
 
+def pending_connection(data_dir: Path, user_id: int, state: str) -> bool:
+    try:
+        value = json.loads(_connection_path(data_dir, user_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as error:
+        raise CalendarAuthError("Stored Google Calendar connection is invalid") from error
+    if not isinstance(value, dict):
+        raise CalendarAuthError("Stored Google Calendar connection is invalid")
+    return value.get("pending_state") == state
+
+
 def _code_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -154,7 +166,7 @@ def create_authorization_url(config, user_id: int, *, now: datetime | None = Non
     now = now or datetime.now(timezone.utc)
     _prune_expired_states(config.data_dir, now)
     _clear_user_states(config.data_dir, user_id)
-    generation = advance_connection(config.data_dir, user_id)
+    generation = connection_generation(config.data_dir, user_id) + 1
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     _write_private_json(_state_path(config.data_dir, state), {
@@ -162,6 +174,9 @@ def create_authorization_url(config, user_id: int, *, now: datetime | None = Non
         "connection_generation": generation,
         "code_verifier": verifier,
         "expires_at": (now + STATE_TTL).isoformat(),
+    })
+    _write_private_json(_connection_path(config.data_dir, user_id), {
+        "generation": generation - 1, "pending_state": state,
     })
     return OAUTH_AUTHORIZE_URL + "?" + urlencode({
         "client_id": config.google_oauth_client_id,
@@ -204,6 +219,23 @@ def consume_oauth_state(data_dir: Path, state: str, *, now: datetime | None = No
         "code_verifier": verifier,
         "connection_generation": generation,
     }
+
+
+def cancel_oauth_state(data_dir: Path, state: str, user_id: int) -> bool:
+    try:
+        path = _state_path(data_dir, state)
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if value.get("telegram_user_id") != user_id:
+                return False
+            path.unlink(missing_ok=True)
+        if pending_connection(data_dir, user_id, state):
+            _write_private_json(_connection_path(data_dir, user_id), {
+                "generation": connection_generation(data_dir, user_id),
+            })
+        return True
+    except (CalendarAuthError, OSError, ValueError, AttributeError):
+        return False
 
 
 async def exchange_code(config, code: str, verifier: str) -> dict:

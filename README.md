@@ -52,17 +52,23 @@ Voice and text records are kept under `data/` with private permissions.
 - [x] Offer quick replies for date and time, including an `All day` option.
 - [x] Store extraction model, contract hash, latency, original DeepSeek JSON, deterministic follow-up changes, and resolved result.
 - [x] Deploy production DeepSeek semantic extraction.
+- [x] Add per-user Google Calendar OAuth with PKCE, private token storage, and connect/disconnect commands.
+- [x] Convert resolved events to timed, all-day, reminder, and recurring Google Calendar payloads.
+- [x] Persist idempotent Calendar writes with stable event IDs and connection-generation checks.
+- [x] Add shadow mode, automatic safe writes, and Confirm/Edit/Cancel review for risky events.
+- [x] Add CI checks with read-only permissions and monthly Dependabot updates.
 
 ### Next
 
-- [ ] Configure Google Cloud OAuth, Cloudflare Tunnel, and run shadow-mode payload review.
-- [ ] Enable manual `Confirm` writes after shadow review.
-- [ ] Canary immediate creation for `auto_write=true`; retain `CALENDAR_WRITE_ENABLED` as rollback.
-- [ ] Read Calendar events and retain Google event references for later list and edit actions.
+- [ ] Complete production shadow-mode payload review.
+- [ ] Add Calendar status, connected-account identity, token recovery, and stale `creating` write recovery.
+- [ ] Add `/settings`: Calendar status, per-user auto-write opt-in, timezone, built-in type-duration overrides, and automatic custom types with durations.
+- [ ] Enable global Calendar writes with per-user auto-write disabled, allowing manual `Confirm` writes only.
+- [ ] Canary per-user automatic creation; retain `CALENDAR_WRITE_ENABLED` as global rollback.
+- [ ] Reassess incremental editor fields from production usage.
+- [ ] Add deployment health checks, backup/rollback steps, and a manual deployment workflow.
 - [ ] Search Google Maps with Moldova bias when an event includes a location.
 - [ ] Show formatted addresses and preview links, then ask the user to choose when several places match.
-- [ ] List previous events and select one to edit.
-- [ ] Support general natural-language edits to existing events.
 
 ## Start
 
@@ -88,7 +94,7 @@ Set `DEBUG=true` in `.env` to also print the raw extraction JSON and the ASR/LLM
 
 Access data lives in `data/access.json`. Console logs use colored levels. Plain file logs use Chisinau timestamps, one dated `bot_DD_MM_YY.log` file per day, and retain seven files by default in `logs/`.
 
-Voice audio and metadata live under `data/voice/<user_id>/<message_id>/` (`audio.ogg` and `record.json`) with private permissions for a rolling 168 hours. Plain text records live under `data/text/`. Cleanup runs hourly and once at startup. Only the local mounted volume is managed by this policy; Telegram and ElevenLabs retention are controlled by those services. Legacy flat timestamp-named recordings were moved once to `data/voice-corpus/` and are not retention-managed. Maximum voice size is 2 MiB.
+Voice audio and metadata live under `data/voice/<user_id>/<message_id>/` (`audio.ogg` and `record.json`) with private permissions for a rolling 168 hours. Plain text records live under `data/text/`. Cleanup runs hourly and once at startup. Only the local mounted volume is managed by this policy; Telegram and ElevenLabs retention are controlled by those services. Legacy flat timestamp-named recordings live in `data/voice-corpus/` and are not retention-managed; local ASR benchmark runner instead reads its paired corpus from `data/voice/`. Maximum voice size is 2 MiB.
 
 Set `HOST_UID` and `HOST_GID` in `.env` when bind-mounted directories belong to a user other than `1000:1000`.
 

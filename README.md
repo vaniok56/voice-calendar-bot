@@ -11,7 +11,11 @@ eligible. A named weekday means its next occurrence; on that weekday, it means
 seven days later. Locations, recurrence, corrections, multiple reminders, past
 starts, unknown operations, ungrounded fields, and DST ambiguity require review.
 
-Each user connects their own Google Calendar with `/connect_calendar`. With
+Each user connects their own Google Calendar with `/connect_calendar`. `/settings`
+shows the connected email, Calendar status, and configured timezone. Existing
+connections must reconnect to grant email identity access; old tokens cannot
+write events. Disconnect tries to revoke the Google refresh token and always
+removes the local credential. With
 `CALENDAR_WRITE_ENABLED=false`, the bot stores normalized payloads in shadow
 mode and never calls Google. With writes enabled, `auto_write=true` events are
 created immediately; other complete events carry `Confirm`, `Edit`, and
@@ -24,7 +28,8 @@ Voice and text records are kept under `data/` with private permissions.
 - `/start` - verify bot is running.
 - `/help` - show usage information.
 - `/connect_calendar` - connect your Google Calendar.
-- `/disconnect_calendar` - remove your stored Google Calendar credential.
+- `/settings` - view Calendar connection, account email, and timezone; reconnect if needed.
+- `/disconnect_calendar` - revoke your Google token and remove your stored credential.
 - `/admin_help` - show administration commands.
 - `/list_users` - open paginated user list with removal controls.
 - `/adduser <user_id>` - add user.
@@ -57,11 +62,11 @@ Voice and text records are kept under `data/` with private permissions.
 - [x] Persist idempotent Calendar writes with stable event IDs and connection-generation checks.
 - [x] Add shadow mode, automatic safe writes, and Confirm/Edit/Cancel review for risky events.
 - [x] Add CI checks with read-only permissions and monthly Dependabot updates.
+- [x] Show connected account and timezone, require verified email for OAuth, revoke on disconnect, and recover expired `creating` writes.
 
 ### Next
 
 - [ ] Complete production shadow-mode payload review.
-- [ ] Add Calendar status, connected-account identity, token recovery, and stale `creating` write recovery.
 - [ ] Add `/settings`: Calendar status, per-user auto-write opt-in, timezone, built-in type-duration overrides, and automatic custom types with durations.
 - [ ] Enable global Calendar writes with per-user auto-write disabled, allowing manual `Confirm` writes only.
 - [ ] Canary per-user automatic creation; retain `CALENDAR_WRITE_ENABLED` as global rollback.
@@ -112,10 +117,10 @@ Set `HOST_UID` and `HOST_GID` in `.env` when bind-mounted directories belong to 
 
 1. Create dedicated Google Cloud project, enable Google Calendar API, and configure OAuth consent screen as External. Add initial Gmail account as test user.
 2. Create Web application OAuth client. Add exact redirect URI: `https://calendar.<your-domain>/google/callback`.
-3. Add `https://www.googleapis.com/auth/calendar.events.owned` to OAuth data-access configuration.
+3. Add `https://www.googleapis.com/auth/calendar.events.owned`, `openid`, and `https://www.googleapis.com/auth/userinfo.email` to OAuth data-access configuration. Reconnect existing test users after deployment; `/settings` shows `Reconnect required` until then.
 4. Create Cloudflare named tunnel with public hostname `calendar.<your-domain>` routed to `http://bot:8080`. Do not protect callback hostname with Cloudflare Access.
 5. Generate a token-encryption key on Reactor with `python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())'`. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, `CALENDAR_TOKEN_ENCRYPTION_KEY`, and `CALENDAR_TUNNEL_TOKEN` in Reactor `.env`. Keep secrets, authorization codes, and token files out of Git and logs. Existing plaintext token files are encrypted on their next read.
 6. Deploy tunnel with `docker compose --profile calendar up --build -d`. No host port mapping is needed.
-7. Leave `CALENDAR_WRITE_ENABLED=false`; connect Gmail with `/connect_calendar`, create events in Romanian, Russian, English, and mixed speech, then inspect `data/google-calendar/writes/`. Enable only after review.
+7. Leave `CALENDAR_WRITE_ENABLED=false`; connect Gmail with `/connect_calendar`, check `/settings` shows correct verified email, create events in Romanian, Russian, English, and mixed speech, then inspect `data/google-calendar/writes/`. Enable only after review. When writes are enabled, `creating` records can retry after ten minutes; retries reuse the stored Google event ID.
 
 Testing OAuth clients can require users to reconnect every seven days. Publish the External consent screen before production use; Calendar scopes may require Google verification.

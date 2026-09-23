@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -11,12 +12,16 @@ from .calendar import (
     CalendarAuthError,
     CalendarPayloadError,
     build_event,
+    claim_write,
     consume_oauth_state,
     connection_generation,
     create_authorization_url,
     create_write,
     disconnect,
+    disconnect_and_revoke,
     edit_payload,
+    exchange_code,
+    fetch_account_email,
     insert_event,
     load_write,
     load_token,
@@ -24,8 +29,10 @@ from .calendar import (
     refresh_access_token,
     reminders_for,
     save_token,
+    token_is_usable,
     update_write,
 )
+from .handlers.calendar import disconnect_calendar_button, google_callback, settings
 
 
 EVENT_ID = "a1234"
@@ -120,6 +127,9 @@ class TestCalendarOAuthStorage(unittest.TestCase):
         now = datetime(2026, 9, 22, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             url = create_authorization_url(self.config(directory), 123, now=now)
+            scopes = set(parse_qs(urlparse(url).query)["scope"][0].split())
+            self.assertIn("openid", scopes)
+            self.assertIn("https://www.googleapis.com/auth/userinfo.email", scopes)
             state = parse_qs(urlparse(url).query)["state"][0]
             pending = consume_oauth_state(Path(directory), state, now=now)
             self.assertEqual(pending["telegram_user_id"], 123)
@@ -173,6 +183,148 @@ class TestCalendarOAuthStorage(unittest.TestCase):
                 pending["connection_generation"], connection_generation(Path(directory), 123)
             )
 
+    def test_legacy_token_requires_reconnect(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            save_token(root, 123, {"access_token": "old", "scope": ["https://www.googleapis.com/auth/calendar.events.owned"]}, TOKEN_KEY)
+            self.assertFalse(token_is_usable(load_token(root, 123, TOKEN_KEY)))
+            token = {
+                "schema_version": 2, "connection_generation": 0,
+                "access_token": "access", "account_email": "user@example.com", "refresh_token": "refresh",
+                "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/calendar.events.owned"],
+            }
+            self.assertTrue(token_is_usable(token))
+            self.assertFalse(token_is_usable({**token, "scope": ["openid"]}))
+
+    @patch("bot.calendar.aiohttp.ClientSession")
+    def test_identity_requires_verified_email_and_successful_lookup(self, client_session):
+        for status, body in ((200, {"email": "a@example.com", "email_verified": False}),
+                             (200, {"email_verified": True}), (503, {})):
+            with self.subTest(body=body):
+                client_session.return_value = TestCalendarWrites().session(
+                    MagicMock(),
+                    TestCalendarWrites().response(status, body),
+                )
+                with self.assertRaises(CalendarAuthError):
+                    asyncio.run(fetch_account_email("access"))
+        client_session.return_value = TestCalendarWrites().session(
+            MagicMock(),
+            TestCalendarWrites().response(200, {"email": "a@example.com", "email_verified": True}),
+        )
+        self.assertEqual(asyncio.run(fetch_account_email("access")), "a@example.com")
+
+    @patch("bot.calendar.aiohttp.ClientSession")
+    def test_code_exchange_requires_all_scopes(self, client_session):
+        client_session.return_value = TestCalendarWrites().session(
+            TestCalendarWrites().response(200, {
+                "access_token": "access", "refresh_token": "refresh", "expires_in": 3600,
+                "scope": "https://www.googleapis.com/auth/calendar.events.owned",
+            })
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CalendarAuthError):
+                asyncio.run(exchange_code(self.config(directory), "code", "verifier"))
+
+    @patch("bot.calendar.aiohttp.ClientSession")
+    def test_disconnect_deletes_credentials_even_if_revocation_fails(self, client_session):
+        client_session.return_value = TestCalendarWrites().session(
+            TestCalendarWrites().response(503, {})
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            save_token(config.data_dir, 123, {"refresh_token": "refresh"}, TOKEN_KEY)
+            self.assertTrue(asyncio.run(disconnect_and_revoke(config, 123)))
+            self.assertIsNone(load_token(config.data_dir, 123, TOKEN_KEY))
+            self.assertEqual(connection_generation(config.data_dir, 123), 1)
+            self.assertEqual(client_session.return_value.post.call_args.kwargs["data"], {"token": "refresh"})
+
+    @patch("bot.handlers.calendar.fetch_account_email", new_callable=AsyncMock, return_value="user@example.com")
+    @patch("bot.handlers.calendar.exchange_code", new_callable=AsyncMock)
+    def test_stale_callback_after_disconnect_or_reconnect_never_saves_token(self, exchange, _email):
+        exchange.return_value = {"access_token": "access", "refresh_token": "refresh", "scope": []}
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            storage = SimpleNamespace(is_allowed=lambda user_id: True)
+            for action in ("disconnect", "reconnect"):
+                url = create_authorization_url(config, 123)
+                state = parse_qs(urlparse(url).query)["state"][0]
+                if action == "disconnect":
+                    disconnect(config.data_dir, 123)
+                else:
+                    create_authorization_url(config, 123)
+                request = SimpleNamespace(
+                    app={"config": config, "storage": storage}, query={"state": state, "code": "code"}
+                )
+                response = asyncio.run(google_callback(request))
+                self.assertEqual(response.status, 400)
+                self.assertIsNone(load_token(config.data_dir, 123, TOKEN_KEY))
+
+    @patch("bot.handlers.calendar.fetch_account_email", new_callable=AsyncMock, return_value="user@example.com")
+    @patch("bot.handlers.calendar.exchange_code", new_callable=AsyncMock)
+    def test_callback_saves_verified_identity_and_generation(self, exchange, _email):
+        exchange.return_value = {
+            "access_token": "access", "refresh_token": "refresh",
+            "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email",
+                      "https://www.googleapis.com/auth/calendar.events.owned"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            url = create_authorization_url(config, 123)
+            state = parse_qs(urlparse(url).query)["state"][0]
+            request = SimpleNamespace(
+                app={"config": config, "storage": SimpleNamespace(is_allowed=lambda user_id: True)},
+                query={"state": state, "code": "code"},
+            )
+            self.assertEqual(asyncio.run(google_callback(request)).status, 200)
+            token = load_token(config.data_dir, 123, TOKEN_KEY)
+            self.assertTrue(token_is_usable(token))
+            path = config.data_dir / "google-calendar" / "tokens" / "123.json"
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
+            self.assertEqual(token["account_email"], "user@example.com")
+            self.assertEqual(token["connection_generation"], connection_generation(config.data_dir, 123))
+
+    def test_settings_reports_connection_status_and_timezone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            config.calendar_timezone = "Europe/Chisinau"
+            message = MagicMock()
+            message.from_user.id = 123
+            message.answer = AsyncMock()
+            asyncio.run(settings(message, config))
+            self.assertIn("Not connected", message.answer.await_args.args[0])
+            save_token(config.data_dir, 123, {"access_token": "legacy"}, TOKEN_KEY)
+            asyncio.run(settings(message, config))
+            self.assertIn("Reconnect required", message.answer.await_args.args[0])
+            save_token(config.data_dir, 123, {
+                "schema_version": 2, "account_email": "user@example.com", "refresh_token": "refresh",
+                "connection_generation": 0, "access_token": "access",
+                "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/calendar.events.owned"],
+            }, TOKEN_KEY)
+            asyncio.run(settings(message, config))
+            self.assertIn("Connected: user@example.com", message.answer.await_args.args[0])
+            self.assertIn("Europe/Chisinau", message.answer.await_args.args[0])
+            buttons = message.answer.await_args.kwargs["reply_markup"].inline_keyboard
+            self.assertIn("disconnect_calendar", [button.callback_data for row in buttons for button in row])
+
+    @patch("bot.calendar.aiohttp.ClientSession")
+    def test_disconnect_button_removes_token(self, client_session):
+        client_session.return_value = TestCalendarWrites().session(TestCalendarWrites().response(200, {}))
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.config(directory)
+            config.calendar_token_encryption_key = TOKEN_KEY
+            save_token(config.data_dir, 123, {"refresh_token": "refresh"}, TOKEN_KEY)
+            callback = MagicMock()
+            callback.from_user.id = 123
+            callback.answer = AsyncMock()
+            callback.message.edit_text = AsyncMock()
+            asyncio.run(disconnect_calendar_button(callback, config))
+            self.assertIsNone(load_token(config.data_dir, 123, TOKEN_KEY))
+            callback.message.edit_text.assert_awaited_once_with("Google Calendar disconnected.")
+
 
 class TestCalendarWrites(unittest.TestCase):
     def config(self):
@@ -225,6 +377,26 @@ class TestCalendarWrites(unittest.TestCase):
         edited = edit_payload(payload, "time", "10:30", "Europe/Chisinau")
         self.assertEqual(edited["id"], payload["id"])
         self.assertEqual(edited["start"]["dateTime"], "2026-09-19T10:30:00+03:00")
+
+    def test_creating_write_requires_expired_lease_and_no_active_worker(self):
+        from .calendar import ACTIVE_WRITES, release_write
+
+        now = datetime(2026, 9, 22, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record = create_write(root, 123, "text/123/456/record.json", {"id": EVENT_ID})
+            write_id = record["write_id"]
+            self.assertIsNotNone(claim_write(root, write_id, now=now))
+            self.assertEqual(load_write(root, write_id)["claimed_at"], now.isoformat())
+            self.assertIsNone(claim_write(root, write_id, now=now + timedelta(minutes=11)))
+            self.assertIn(write_id, ACTIVE_WRITES)
+            release_write(write_id)
+            self.assertIsNone(claim_write(root, write_id, now=now + timedelta(minutes=9)))
+            self.assertIsNotNone(claim_write(root, write_id, now=now + timedelta(minutes=10)))
+            release_write(write_id)
+            update_write(root, write_id, claimed_at=None)  # Pre-lease records are stale.
+            self.assertIsNotNone(claim_write(root, write_id, now=now + timedelta(minutes=11)))
+            release_write(write_id)
 
     @patch("bot.calendar.aiohttp.ClientSession")
     def test_refresh_access_token(self, client_session):

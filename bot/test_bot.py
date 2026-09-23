@@ -364,12 +364,22 @@ class TestReplyFlow(unittest.TestCase):
         path.write_text("{}", encoding="utf-8")
         return path
 
+    def calendar_token(self, generation=0):
+        return {
+            "access_token": "access", "refresh_token": "refresh",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+            "connection_generation": generation, "schema_version": 2,
+            "account_email": "user@example.com",
+            "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email",
+                      "https://www.googleapis.com/auth/calendar.events.owned"],
+        }
+
     def test_disabled_mode_shadows_without_google_request(self):
         raw = complete_raw()
         resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, False)
-            save_token(config.data_dir, 1, {"access_token": "access"}, config.calendar_token_encryption_key)
+            save_token(config.data_dir, 1, self.calendar_token(), config.calendar_token_encryption_key)
             message = self.message()
             asyncio.run(reply_event(
                 message, MagicMock(), {}, 1, raw, resolved, None,
@@ -380,6 +390,23 @@ class TestReplyFlow(unittest.TestCase):
         self.assertEqual(write["status"], "shadowed")
         self.assertIn("Shadowed", message.answer.await_args.args[0])
 
+    def test_legacy_token_cannot_create_write(self):
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, True)
+            save_token(config.data_dir, 1, {
+                "access_token": "access", "refresh_token": "refresh",
+                "connection_generation": 0,
+            }, config.calendar_token_encryption_key)
+            message = self.message()
+            asyncio.run(reply_event(
+                message, MagicMock(), {}, 1, raw, resolved, None,
+                record_path=self.calendar_record_path(directory), config=config,
+            ))
+            self.assertIn("Reconnect required", message.answer.await_args.args[0])
+            self.assertFalse((config.data_dir / "google-calendar" / "writes").exists())
+
     @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
     def test_auto_write_creates_once_when_connected(self, mock_insert):
         raw = complete_raw()
@@ -387,11 +414,7 @@ class TestReplyFlow(unittest.TestCase):
         mock_insert.return_value = {"id": "google-event", "htmlLink": "https://calendar.google/event"}
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, True)
-            save_token(config.data_dir, 1, {
-                "access_token": "access", "refresh_token": "refresh",
-                "expires_at": "2099-01-01T00:00:00+00:00",
-                "connection_generation": 0,
-            }, config.calendar_token_encryption_key)
+            save_token(config.data_dir, 1, self.calendar_token(), config.calendar_token_encryption_key)
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,
                 record_path=self.calendar_record_path(directory), config=config,
@@ -404,11 +427,7 @@ class TestReplyFlow(unittest.TestCase):
         resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, True)
-            save_token(config.data_dir, 1, {
-                "access_token": "access", "refresh_token": "refresh",
-                "expires_at": "2099-01-01T00:00:00+00:00",
-                "connection_generation": 1,
-            }, config.calendar_token_encryption_key)
+            save_token(config.data_dir, 1, self.calendar_token(1), config.calendar_token_encryption_key)
             message = self.message()
             asyncio.run(reply_event(
                 message, MagicMock(), {}, 1, raw, resolved, None,
@@ -425,11 +444,7 @@ class TestReplyFlow(unittest.TestCase):
         mock_insert.return_value = {"id": "google-event"}
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, True)
-            save_token(config.data_dir, 1, {
-                "access_token": "access", "refresh_token": "refresh",
-                "expires_at": "2099-01-01T00:00:00+00:00",
-                "connection_generation": 0,
-            }, config.calendar_token_encryption_key)
+            save_token(config.data_dir, 1, self.calendar_token(), config.calendar_token_encryption_key)
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,
                 record_path=self.calendar_record_path(directory), config=config,
@@ -443,6 +458,26 @@ class TestReplyFlow(unittest.TestCase):
             asyncio.run(confirm_calendar_write(callback, config))
             asyncio.run(confirm_calendar_write(callback, config))
         mock_insert.assert_awaited_once()
+
+    @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
+    def test_disabled_retry_preserves_failed_record(self, mock_insert):
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, False)
+            from .calendar import create_write, update_write
+
+            write = create_write(config.data_dir, 1, "text/1/42/record.json", {
+                "id": "a1234", "summary": "Sync", "start": {"date": "2026-09-19"},
+            })
+            update_write(config.data_dir, write["write_id"], status="failed", error="Previous failure")
+            callback = MagicMock()
+            callback.data = f"confirm:{write['write_id']}"
+            callback.from_user.id = 1
+            callback.answer = AsyncMock()
+            callback.message.edit_text = AsyncMock()
+            asyncio.run(confirm_calendar_write(callback, config))
+            self.assertEqual(load_write(config.data_dir, write["write_id"])["status"], "failed")
+            self.assertEqual(load_write(config.data_dir, write["write_id"])["error"], "Previous failure")
+            mock_insert.assert_not_awaited()
 
     def test_voice_reply_is_rejected_before_transcription(self):
         with tempfile.TemporaryDirectory() as directory:

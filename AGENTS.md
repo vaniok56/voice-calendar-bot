@@ -61,7 +61,7 @@ Drafts and edit state are process-local. Restarting bot clears them. Durable rec
 
 ## User Interfaces
 
-Allowed users can use `/start`, `/help`, `/connect_calendar`, `/disconnect_calendar`, plain text, and Telegram voice.
+Allowed users can use `/start`, `/help`, `/settings`, `/connect_calendar`, `/disconnect_calendar`, plain text, and Telegram voice. `/settings` currently shows Calendar connection/email and the global timezone; profile controls arrive in Branch 2.
 
 Admins also use `/admin_help`, `/list_users`, `/adduser <user_id>`. Owner alone can use `/add_admin <user_id>` and `/rm_admin <user_id>`.
 
@@ -108,10 +108,11 @@ When changing prompt, schema, resolver, defaults, grounding, or risk behavior, u
 
 ## Calendar Contract
 
-Calendar OAuth is per Telegram user. Scope is `calendar.events.owned` only. OAuth uses authorization code plus PKCE S256.
+Calendar OAuth is per Telegram user. Scopes are `calendar.events.owned`, `openid`, and `userinfo.email`. OAuth uses authorization code plus PKCE S256. Callback requires verified email from userinfo before saving the encrypted v2 token; legacy tokens require reconnect and cannot write.
 
 - State is random, private, single-use, and expires after ten minutes.
 - Each user has durable `connection_generation`.
+- Disconnect attempts refresh-token revocation with a short timeout after removing local credentials; user removal uses the same path.
 - Connecting, reconnecting, or disconnecting advances generation.
 - Callback verifies user still has access and generation matches before saving token.
 - Writes record generation. Any changed connection rejects old write before token refresh or Google insertion.
@@ -133,7 +134,7 @@ pending -> shadowed | creating -> created | failed | cancelled
 
 Write record keeps opaque `write_id`, stable Google event ID, payload fingerprint, source record, user, and connection generation. Stable Google event ID plus ownership marker makes retry conflict-safe. Do not substitute message IDs for write IDs in callback data.
 
-`ACTIVE_WRITES` only prevents duplicate work in current process. It is not a crash-recovery lease. Stale `creating` recovery is intentionally planned in `NEXT_BRANCH_PLAN.md`; do not claim it already exists.
+`ACTIVE_WRITES` prevents duplicate work in current process. Durable UTC `claimed_at` gives `creating` a ten-minute retry lease; old `creating` records without timestamp are retryable. Recovered writes reuse their stable Google event ID. Disabled writes cannot retry.
 
 Runtime behavior:
 
@@ -268,7 +269,7 @@ Current untracked planning files may belong to user work. Do not delete, stage, 
 
 `NEXT_BRANCH_PLAN.md` defines three committed branches:
 
-1. Calendar status, account identity, token recovery, stale creating-write recovery.
+1. Calendar status, account identity, token recovery, stale creating-write recovery (implemented on Branch 1).
 2. `/settings`: per-user auto-write opt-in, timezone, built-in type-duration overrides, and automatic custom types with durations. Automatic creation must require global enablement, user opt-in, and resolver `auto_write=true`.
 3. Deployment safety: health check, backups/rollback, manual deployment before automation.
 

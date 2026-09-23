@@ -23,6 +23,12 @@ from ..calendar import (
 router = Router(name="calendar")
 
 
+def _connect_markup(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Connect Google Calendar", url=url),
+    ]])
+
+
 @router.message(Command("connect_calendar"))
 async def connect_calendar(message: Message, config) -> None:
     user_id = message.from_user.id if message.from_user else 0
@@ -32,8 +38,8 @@ async def connect_calendar(message: Message, config) -> None:
         await message.answer("Google Calendar connection is not configured.")
         return
     await message.answer(
-        "Open this link to connect Google Calendar. It expires in 10 minutes:\n" + url,
-        disable_web_page_preview=True,
+        "Connect Google Calendar with the button below. It expires in 10 minutes.",
+        reply_markup=_connect_markup(url),
     )
 
 
@@ -46,8 +52,8 @@ async def connect_calendar_button(callback: CallbackQuery, config) -> None:
         return
     await callback.answer()
     await callback.message.answer(
-        "Open this link to connect Google Calendar. It expires in 10 minutes:\n" + url,
-        disable_web_page_preview=True,
+        "Connect Google Calendar with the button below. It expires in 10 minutes.",
+        reply_markup=_connect_markup(url),
     )
 
 

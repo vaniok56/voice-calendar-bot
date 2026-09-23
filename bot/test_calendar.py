@@ -32,7 +32,13 @@ from .calendar import (
     token_is_usable,
     update_write,
 )
-from .handlers.calendar import disconnect_calendar_button, google_callback, settings
+from .handlers.calendar import (
+    connect_calendar,
+    connect_calendar_button,
+    disconnect_calendar_button,
+    google_callback,
+    settings,
+)
 
 
 EVENT_ID = "a1234"
@@ -122,6 +128,26 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             google_oauth_client_secret="client-secret",
             google_oauth_redirect_uri="https://calendar.example.com/google/callback",
         )
+
+    @patch("bot.handlers.calendar.create_authorization_url", return_value="https://accounts.google.com/oauth?state=opaque")
+    def test_connect_replies_with_url_button_without_visible_link(self, create_url):
+        message = MagicMock()
+        message.from_user.id = 123
+        message.answer = AsyncMock()
+        callback = MagicMock()
+        callback.from_user.id = 123
+        callback.answer = AsyncMock()
+        callback.message.answer = AsyncMock()
+        config = self.config(".")
+        asyncio.run(connect_calendar(message, config))
+        asyncio.run(connect_calendar_button(callback, config))
+        self.assertEqual(create_url.call_count, 2)
+        for reply in (message.answer, callback.message.answer):
+            text = reply.await_args.args[0]
+            button = reply.await_args.kwargs["reply_markup"].inline_keyboard[0][0]
+            self.assertNotIn("https://", text)
+            self.assertEqual(button.url, "https://accounts.google.com/oauth?state=opaque")
+            self.assertIsNone(button.callback_data)
 
     def test_state_is_single_use_and_tied_to_user(self):
         now = datetime(2026, 9, 22, tzinfo=timezone.utc)

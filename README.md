@@ -11,7 +11,8 @@ eligible. A named weekday means its next occurrence; on that weekday, it means
 seven days later. Locations, recurrence, corrections, multiple reminders, past
 starts, unknown operations, ungrounded fields, and DST ambiguity require review.
 
-Each user connects their own Google Calendar with `/connect_calendar`. `/settings`
+Each user connects their own Google Calendar with `/connect_calendar` and its
+inline authorization button. `/settings`
 shows the connected email, Calendar status, and configured timezone. Existing
 connections must reconnect to grant email identity access; old tokens cannot
 write events. Disconnect tries to revoke the Google refresh token and always

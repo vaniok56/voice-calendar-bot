@@ -183,7 +183,9 @@ async def _execute_calendar_write(config, write: dict) -> dict:
     write_id = write["write_id"]
     try:
         try:
-            token = load_token(config.data_dir, write["telegram_user_id"])
+            token = load_token(
+                config.data_dir, write["telegram_user_id"], config.calendar_token_encryption_key
+            )
             if token is None:
                 raise CalendarAuthError("Google Calendar is not connected")
             generation = write.get("connection_generation", 0)
@@ -194,7 +196,9 @@ async def _execute_calendar_write(config, write: dict) -> dict:
                 raise CalendarAuthError("Google Calendar connection changed")
             if _token_is_expired(token):
                 refreshed = await refresh_access_token(config, token)
-                current = load_token(config.data_dir, write["telegram_user_id"])
+                current = load_token(
+                    config.data_dir, write["telegram_user_id"], config.calendar_token_encryption_key
+                )
                 if (
                     current is None
                     or current.get("refresh_token") != token.get("refresh_token")
@@ -203,7 +207,10 @@ async def _execute_calendar_write(config, write: dict) -> dict:
                 ):
                     raise CalendarAuthError("Google Calendar connection was removed")
                 token = {**token, **refreshed}
-                save_token(config.data_dir, write["telegram_user_id"], token)
+                save_token(
+                    config.data_dir, write["telegram_user_id"], token,
+                    config.calendar_token_encryption_key,
+                )
             event = await insert_event(token, write["payload"])
         except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:
             return update_write(config.data_dir, write_id, status="failed", error=str(error))
@@ -329,7 +336,7 @@ async def reply_event(
             return
         if config is not None and record_path is not None and oauth_is_configured(config):
             try:
-                token = load_token(config.data_dir, user_id)
+                token = load_token(config.data_dir, user_id, config.calendar_token_encryption_key)
             except CalendarAuthError:
                 token = None
             if token is None:

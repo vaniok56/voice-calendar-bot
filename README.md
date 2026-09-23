@@ -114,7 +114,7 @@ Set `HOST_UID` and `HOST_GID` in `.env` when bind-mounted directories belong to 
 2. Create Web application OAuth client. Add exact redirect URI: `https://calendar.<your-domain>/google/callback`.
 3. Add `https://www.googleapis.com/auth/calendar.events.owned` to OAuth data-access configuration.
 4. Create Cloudflare named tunnel with public hostname `calendar.<your-domain>` routed to `http://bot:8080`. Do not protect callback hostname with Cloudflare Access.
-5. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, and `CALENDAR_TUNNEL_TOKEN` in Reactor `.env`. Keep secrets, authorization codes, and token files out of Git and logs.
+5. Generate a token-encryption key on Reactor with `python3 -c 'import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())'`. Set `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REDIRECT_URI`, `CALENDAR_TOKEN_ENCRYPTION_KEY`, and `CALENDAR_TUNNEL_TOKEN` in Reactor `.env`. Keep secrets, authorization codes, and token files out of Git and logs. Existing plaintext token files are encrypted on their next read.
 6. Deploy tunnel with `docker compose --profile calendar up --build -d`. No host port mapping is needed.
 7. Leave `CALENDAR_WRITE_ENABLED=false`; connect Gmail with `/connect_calendar`, create events in Romanian, Russian, English, and mixed speech, then inspect `data/google-calendar/writes/`. Enable only after review.
 

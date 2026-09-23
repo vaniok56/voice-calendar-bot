@@ -35,6 +35,8 @@ from .handlers.voice import (
     reply_event,
     run_extraction,
 )
+from .handlers.admin import admin_help
+from .profile import load_profile, save_profile
 
 
 REFERENCE = datetime(2026, 9, 18, 12, 0, tzinfo=semantic.ZONE)
@@ -213,6 +215,16 @@ class TestRunExtraction(unittest.TestCase):
 
 
 class TestDrafts(unittest.TestCase):
+    def test_follow_up_keeps_profile_zone_and_duration_snapshot(self):
+        raw = semantic_raw()
+        raw["date"].update(kind="relative", source="tomorrow", offset_days=1)
+        draft = Draft(raw, ["sync tomorrow"], REFERENCE, "time", Path("record.json"),
+                      timezone="Asia/Tokyo", profile={"type_durations": {"meeting": 45},
+                                                      "custom_types": [], "timezone": "Asia/Tokyo", "revision": 1})
+        resolved = apply_answer(draft, "09:00")
+        self.assertEqual(resolved["start"], "2026-09-19T09:00:00+09:00")
+        self.assertEqual((resolved["duration_minutes"], resolved["duration_origin"]), (45, "profile_builtin"))
+
     def draft(self, raw, field, record_path):
         return Draft(deepcopy(raw), ["sync"], REFERENCE, field, record_path)
 
@@ -249,10 +261,25 @@ class TestDrafts(unittest.TestCase):
 
 
 class TestPresentation(unittest.TestCase):
+    def test_admin_help_alone_shows_global_writes(self):
+        message = MagicMock()
+        message.from_user.id = 1
+        message.answer = AsyncMock()
+        storage = SimpleNamespace(is_admin=lambda user_id: user_id == 1)
+        asyncio.run(admin_help(message, storage, SimpleNamespace(calendar_write_enabled=True)))
+        self.assertIn("Google writes: On ✅", message.answer.await_args.args[0])
+        message.answer.reset_mock()
+        asyncio.run(admin_help(message, storage, SimpleNamespace(calendar_write_enabled=False)))
+        self.assertIn("Google writes: Off ❌", message.answer.await_args.args[0])
+        message.answer.reset_mock()
+        message.from_user.id = 2
+        asyncio.run(admin_help(message, storage, SimpleNamespace(calendar_write_enabled=True)))
+        message.answer.assert_not_awaited()
+
     def test_card_displays_readiness_and_risks(self):
         resolved = semantic.resolve(complete_raw(), "sync tomorrow 09:00", REFERENCE)
         text = format_resolved(resolved)
-        self.assertIn("Ready for automatic creation", text)
+        self.assertIn("Safe to create without review when automatic writes are enabled", text)
         risky = {**resolved, "auto_write": False, "risks": ["weekday"]}
         self.assertIn("Needs confirmation", format_resolved(risky))
         self.assertIn("weekday", format_resolved(risky))
@@ -414,6 +441,9 @@ class TestReplyFlow(unittest.TestCase):
         mock_insert.return_value = {"id": "google-event", "htmlLink": "https://calendar.google/event"}
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, True)
+            profile = load_profile(config.data_dir, 1, config.calendar_timezone)
+            profile["auto_write_enabled"] = True
+            save_profile(config.data_dir, 1, config.calendar_timezone, profile)
             save_token(config.data_dir, 1, self.calendar_token(), config.calendar_token_encryption_key)
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,
@@ -427,6 +457,9 @@ class TestReplyFlow(unittest.TestCase):
         resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, True)
+            profile = load_profile(config.data_dir, 1, config.calendar_timezone)
+            profile["auto_write_enabled"] = True
+            save_profile(config.data_dir, 1, config.calendar_timezone, profile)
             save_token(config.data_dir, 1, self.calendar_token(1), config.calendar_token_encryption_key)
             message = self.message()
             asyncio.run(reply_event(
@@ -435,6 +468,62 @@ class TestReplyFlow(unittest.TestCase):
             ))
         mock_insert.assert_not_awaited()
         self.assertIn("creation failed", message.answer.await_args.args[0])
+
+    @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
+    def test_auto_write_requires_live_opt_in_and_resolver_safety(self, mock_insert):
+        raw = complete_raw()
+        safe = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, True)
+            save_token(config.data_dir, 1, self.calendar_token(), config.calendar_token_encryption_key)
+            record = self.calendar_record_path(directory)
+            message = self.message()
+            asyncio.run(reply_event(message, MagicMock(), {}, 1, raw, safe, None,
+                                    record_path=record, config=config))
+            self.assertIn("Automatic writes off; confirm", message.answer.await_args.args[0])
+            profile = load_profile(config.data_dir, 1, config.calendar_timezone)
+            profile["auto_write_enabled"] = True
+            save_profile(config.data_dir, 1, config.calendar_timezone, profile)
+            risky = {**safe, "risks": ["location"], "auto_write": False}
+            asyncio.run(reply_event(self.message(), MagicMock(), {}, 1, raw, risky, None,
+                                    record_path=record, config=config))
+            mock_insert.assert_not_awaited()
+            profile = load_profile(config.data_dir, 1, config.calendar_timezone)
+            profile["auto_write_enabled"] = False
+            save_profile(config.data_dir, 1, config.calendar_timezone, profile)
+            asyncio.run(reply_event(self.message(), MagicMock(), {}, 1, raw, safe, None,
+                                    record_path=record, config=config,
+                                    profile={**profile, "auto_write_enabled": True}))
+            mock_insert.assert_not_awaited()
+
+    @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
+    @patch("bot.handlers.voice.refresh_access_token", new_callable=AsyncMock)
+    def test_disabling_auto_write_during_refresh_prevents_insert(self, refresh, insert):
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, True)
+            profile = load_profile(config.data_dir, 1, config.calendar_timezone)
+            profile["auto_write_enabled"] = True
+            save_profile(config.data_dir, 1, config.calendar_timezone, profile)
+            token = self.calendar_token()
+            token["expires_at"] = "2000-01-01T00:00:00+00:00"
+            save_token(config.data_dir, 1, token, config.calendar_token_encryption_key)
+
+            async def disable(_config, _token):
+                current = load_profile(config.data_dir, 1, config.calendar_timezone)
+                current["auto_write_enabled"] = False
+                save_profile(config.data_dir, 1, config.calendar_timezone, current)
+                return {"access_token": "refreshed", "expires_at": "2099-01-01T00:00:00+00:00"}
+
+            refresh.side_effect = disable
+            message = self.message()
+            asyncio.run(reply_event(message, MagicMock(), {}, 1, raw, resolved, None,
+                                    record_path=self.calendar_record_path(directory), config=config))
+            write_path = next((config.data_dir / "google-calendar" / "writes").glob("*.json"))
+            self.assertEqual(load_write(config.data_dir, write_path.stem)["status"], "pending")
+            self.assertIn("confirm to create", message.answer.await_args.args[0])
+        insert.assert_not_awaited()
 
     @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
     def test_confirm_retry_does_not_duplicate_event(self, mock_insert):

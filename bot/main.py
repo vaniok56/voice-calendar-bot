@@ -49,11 +49,12 @@ async def main_async(config: Config) -> None:
     )
     callback_runner = None
     settings_messages = {}
+    settings_edits = {}
 
     try:
         if calendar_service.oauth_is_configured(config):
             callback_runner = web.AppRunner(
-                calendar.callback_app(config, storage, bot, settings_messages)
+                calendar.callback_app(config, storage, bot, settings_messages, settings_edits)
             )
             await callback_runner.setup()
             await web.TCPSite(
@@ -71,6 +72,7 @@ async def main_async(config: Config) -> None:
             drafts={},
             calendar_edits={},
             settings_messages=settings_messages,
+            settings_edits=settings_edits,
             elevenlabs_api_key=config.elevenlabs_api_key,
             elevenlabs_model=config.elevenlabs_model,
             deepseek_api_key=config.deepseek_api_key,

@@ -401,6 +401,7 @@ async def disconnect_and_revoke(config, user_id: int, *, remove_user: bool = Fal
 
 def forget_user(data_dir: Path, user_id: int) -> None:
     disconnect(data_dir, user_id)
+    _calendar_user_path(data_dir, "profiles", user_id).unlink(missing_ok=True)
     writes = _calendar_root(data_dir) / "writes"
     for path in writes.glob("*.json"):
         try:
@@ -421,7 +422,8 @@ def new_google_event_id() -> str:
 
 
 def create_write(
-    data_dir: Path, user_id: int, source_record: str, payload: dict, *, connection: int = 0
+    data_dir: Path, user_id: int, source_record: str, payload: dict, *, connection: int = 0,
+    timezone_name: str | None = None,
 ) -> dict:
     if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
         raise CalendarPayloadError("Invalid Telegram user")
@@ -439,6 +441,7 @@ def create_write(
         "write_id": write_id,
         "telegram_user_id": user_id,
         "connection_generation": connection,
+        "timezone": timezone_name,
         "source_record": source_record,
         "event_id": event_id,
         "payload_fingerprint": hashlib.sha256(

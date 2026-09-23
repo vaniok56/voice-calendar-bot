@@ -26,6 +26,7 @@ Keep this split intact: model extracts source-grounded semantic fields; determin
 | `bot/semantic.py` | Model schema/prompt and deterministic resolver. Highest-risk behavior. |
 | `bot/drafts.py` | In-memory deterministic clarification state. |
 | `bot/calendar.py` | OAuth, private Calendar persistence, payload conversion, Google API client. |
+| `bot/profile.py` | Private per-user preferences, revision conflict and validation. |
 | `bot/retention.py` | Expired voice/text record cleanup. |
 | `bot/logging_config.py` | Chisinau-time console/file logging. |
 | `bot/handlers/start.py` | Start/help commands. |
@@ -61,7 +62,7 @@ Drafts and edit state are process-local. Restarting bot clears them. Durable rec
 
 ## User Interfaces
 
-Allowed users can use `/start`, `/help`, `/settings`, plain text, and Telegram voice. `/settings` posts a fresh settings card at bottom of chat, best-effort deletes the previous process-local card, and shows Calendar connection/email, global timezone, and inline Connect/Reconnect/Switch account/Disconnect controls; profile controls arrive in Branch 2. Connect edits current card to show OAuth URL and Back; Back invalidates pending state and restores card. Successful OAuth callback updates current card and sends a private Telegram confirmation. Callback from an event card creates a separate settings card rather than replacing event. Old connect/disconnect commands are not registered; slash commands do not enter extraction handler.
+Allowed users can use `/start`, `/help`, `/settings`, plain text, and Telegram voice. `/settings` posts a fresh settings card at bottom of chat, best-effort deletes previous process-local card, and shows Calendar connection/email, per-user automatic-write preference, timezone, built-in durations, and custom types (two-column submenus). Connect edits current card to show OAuth URL and Back; Back invalidates pending state and restores card. Disconnect requires a confirmation card. Settings input prompts use one Back button to return to their menu. Successful OAuth callback updates current card and sends a private Telegram confirmation. Callback from an event card creates a separate settings card rather than replacing event. Admins see global Google writes status in `/admin_help` only. Old connect/disconnect commands are not registered; slash commands do not enter extraction handler.
 
 Admins also use `/admin_help`, `/list_users`, `/adduser <user_id>`. Owner alone can use `/add_admin <user_id>` and `/rm_admin <user_id>`.
 
@@ -76,9 +77,10 @@ Text routing order matters:
 
 1. Pending Calendar edit consumes text.
 2. Pending semantic draft consumes text as strict answer.
-3. Otherwise text is a new extraction request.
+3. Pending settings wizard consumes text (name, duration, or exact IANA timezone).
+4. Otherwise text is a new extraction request.
 
-Do not add another text-consuming user state without resolving collision with drafts and Calendar edits.
+Settings wizard is mutually exclusive with drafts and Calendar edits; `/settings` asks user to finish active event flow. Its input expires after ten minutes.
 
 ## Semantic Contract and Safety
 
@@ -92,8 +94,8 @@ Rules:
 - Named weekday always means next occurrence; same weekday means seven days later.
 - Bare 1-12 clock values remain `unspecified` meridiem; resolver behavior must stay covered by tests.
 - Resolver identifies invalid/nonexistent and ambiguous local times around DST.
-- `trip` lasts until next midnight when duration is absent. Current trip fallback uses module-level Chisinau `ZONE`; account for this before claiming full non-default timezone support. Birthdays are all-day. Other types use `DEFAULT_DURATION` only after complete start exists.
-- `auto_write` means `complete and not errors and not risks`; never loosen it casually.
+- `trip` lasts until next midnight in the request timezone when duration is absent. Birthdays are all-day. Other timed types use explicit end/duration, profile custom/built-in duration, then `DEFAULT_DURATION`, only after complete start exists. Explicit end/duration disagreement requires confirmation.
+- `auto_write` means `complete and not errors and not risks`; actual automatic creation additionally requires global Calendar writes and current user profile opt-in. Never loosen resolver eligibility casually.
 
 Current risks include ungrounded fields, self-correction, location, recurrence, multiple reminders, past start, unknown operation, and DST ambiguity. New semantic capability needs a decision whether it adds an error, a risk, a confirmation path, and benchmark cases.
 
@@ -141,7 +143,7 @@ Runtime behavior:
 
 - OAuth not configured: skip durable Calendar persistence/insertion path. OAuth configured but user disconnected: show connect action.
 - `CALENDAR_WRITE_ENABLED=false`: persist `shadowed`; never call Google.
-- Eligible safe write with enabled Calendar: create immediately.
+- Eligible safe write with enabled Calendar: create immediately only if live user profile opts in; otherwise show manual confirmation.
 - Risky complete write: show Confirm/Edit/Cancel.
 - Existing editor changes only pending title, date, or time. Do not broaden editor/recurrence behavior without scoped product work.
 
@@ -161,6 +163,7 @@ data/text/<telegram_user_id>/<message_id>/record.json
 data/google-calendar/tokens/<telegram_user_id>.json
 data/google-calendar/states/<state>.json
 data/google-calendar/connections/<telegram_user_id>.json
+data/google-calendar/profiles/<telegram_user_id>.json
 data/google-calendar/writes/<write_id>.json
 logs/bot_DD_MM_YY.log
 ```
@@ -271,7 +274,7 @@ Current untracked planning files may belong to user work. Do not delete, stage, 
 `NEXT_BRANCH_PLAN.md` defines three committed branches:
 
 1. Calendar status, account identity, token recovery, stale creating-write recovery (implemented on Branch 1).
-2. `/settings`: per-user auto-write opt-in, timezone, built-in type-duration overrides, and automatic custom types with durations. Automatic creation must require global enablement, user opt-in, and resolver `auto_write=true`.
+2. `/settings`: per-user auto-write opt-in, timezone, built-in type-duration overrides, and automatic custom types with durations (under practical user review). Automatic creation requires global enablement, user opt-in, and resolver `auto_write=true`.
 3. Deployment safety: health check, backups/rollback, manual deployment before automation.
 
 Deferred separate product branches: editor additions one field at a time; Google Maps with Moldova-biased location search, formatted address/preview, and `LocationChoice` for ambiguous results. Do not fold Maps into recovery/preferences/editor work. Other work requiring separate approval: event listing, general natural-language editing, recurrence mutation, broad settings search, arbitrary scripts, and category-specific LLM prompts.

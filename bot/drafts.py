@@ -20,6 +20,7 @@ class Draft:
     chat_id: int | None = None
     message_id: int | None = None
     timezone: str = "Europe/Chisinau"
+    profile: dict | None = None
 
 
 def next_field(resolved: dict) -> str | None:
@@ -63,7 +64,7 @@ def apply_answer(draft: Draft, text: str) -> dict:
     draft.evidence.append(value)
     draft.attempts += 1
     resolved = semantic.resolve(
-        draft.raw, "\n".join(draft.evidence), draft.reference, ZoneInfo(draft.timezone)
+        draft.raw, "\n".join(draft.evidence), draft.reference, ZoneInfo(draft.timezone), draft.profile
     )
     following = next_field(resolved)
     if following is not None:

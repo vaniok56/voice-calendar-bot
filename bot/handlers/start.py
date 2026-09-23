@@ -18,7 +18,7 @@ START_TEXT = (
     "Retention: up to 7 days\n\n"
     "/start - show this message\n"
     "/help - show this message\n"
-    "/settings - manage Google Calendar connection and view timezone"
+    "/settings - manage Calendar account, automatic writes, timezone and event types"
 )
 
 

@@ -78,15 +78,15 @@ Voice and text records are kept under `data/` with private permissions.
 - [x] Add shadow mode, automatic safe writes, and Confirm/Edit/Cancel review for risky events.
 - [x] Add CI checks with read-only permissions and monthly Dependabot updates.
 - [x] Show connected account and timezone, require verified email for OAuth, revoke on disconnect, and recover expired `creating` writes.
+- [x] Add per-user profiles for automatic-write opt-in, timezone, built-in durations, and custom types; review `/settings` flow in production.
+- [x] Enable global Calendar writes; opted-out users confirm safe writes manually.
 
 ### Next
 
-- [ ] Complete production shadow-mode payload review.
-- [ ] Review Branch 2 `/settings` flow and per-user profile behavior in practice.
-- [ ] Enable global Calendar writes with per-user auto-write disabled, allowing manual `Confirm` writes only.
+- [ ] Review production Calendar payloads and write-recovery metrics before widening automatic-write opt-in.
 - [ ] Canary per-user automatic creation; retain `CALENDAR_WRITE_ENABLED` as global rollback.
-- [ ] Reassess incremental editor fields from production usage.
 - [ ] Add deployment health checks, backup/rollback steps, and a manual deployment workflow.
+- [ ] Reassess incremental editor fields from production usage.
 - [ ] Search Google Maps with Moldova bias when an event includes a location.
 - [ ] Show formatted addresses and preview links, then ask the user to choose when several places match.
 

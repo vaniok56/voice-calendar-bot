@@ -15,16 +15,22 @@ from cryptography.fernet import Fernet, InvalidToken
 
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.owned"
+IDENTITY_SCOPES = {"openid", "https://www.googleapis.com/auth/userinfo.email"}
+REQUIRED_SCOPES = IDENTITY_SCOPES | {CALENDAR_SCOPE}
 MAX_REMINDERS = 5
 MAX_REMINDER_MINUTES = 4 * 7 * 24 * 60
 EVENT_ID = re.compile(r"[a-v0-9]{5,1024}\Z")
 WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
 OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
+OAUTH_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 STATE_TTL = timedelta(minutes=10)
+WRITE_LEASE = timedelta(minutes=10)
 WRITE_ID = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20, connect=5)
+REVOKE_TIMEOUT = aiohttp.ClientTimeout(total=5, connect=3)
 ACTIVE_WRITES: set[str] = set()
 
 
@@ -137,6 +143,18 @@ def advance_connection(data_dir: Path, user_id: int) -> int:
     return generation
 
 
+def pending_connection(data_dir: Path, user_id: int, state: str) -> bool:
+    try:
+        value = json.loads(_connection_path(data_dir, user_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as error:
+        raise CalendarAuthError("Stored Google Calendar connection is invalid") from error
+    if not isinstance(value, dict):
+        raise CalendarAuthError("Stored Google Calendar connection is invalid")
+    return value.get("pending_state") == state
+
+
 def _code_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode()).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -148,7 +166,7 @@ def create_authorization_url(config, user_id: int, *, now: datetime | None = Non
     now = now or datetime.now(timezone.utc)
     _prune_expired_states(config.data_dir, now)
     _clear_user_states(config.data_dir, user_id)
-    generation = advance_connection(config.data_dir, user_id)
+    generation = connection_generation(config.data_dir, user_id) + 1
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
     _write_private_json(_state_path(config.data_dir, state), {
@@ -157,11 +175,14 @@ def create_authorization_url(config, user_id: int, *, now: datetime | None = Non
         "code_verifier": verifier,
         "expires_at": (now + STATE_TTL).isoformat(),
     })
+    _write_private_json(_connection_path(config.data_dir, user_id), {
+        "generation": generation - 1, "pending_state": state,
+    })
     return OAUTH_AUTHORIZE_URL + "?" + urlencode({
         "client_id": config.google_oauth_client_id,
         "redirect_uri": config.google_oauth_redirect_uri,
         "response_type": "code",
-        "scope": CALENDAR_SCOPE,
+        "scope": " ".join(sorted(REQUIRED_SCOPES)),
         "access_type": "offline",
         "prompt": "consent",
         "code_challenge": _code_challenge(verifier),
@@ -200,6 +221,23 @@ def consume_oauth_state(data_dir: Path, state: str, *, now: datetime | None = No
     }
 
 
+def cancel_oauth_state(data_dir: Path, state: str, user_id: int) -> bool:
+    try:
+        path = _state_path(data_dir, state)
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if value.get("telegram_user_id") != user_id:
+                return False
+            path.unlink(missing_ok=True)
+        if pending_connection(data_dir, user_id, state):
+            _write_private_json(_connection_path(data_dir, user_id), {
+                "generation": connection_generation(data_dir, user_id),
+            })
+        return True
+    except (CalendarAuthError, OSError, ValueError, AttributeError):
+        return False
+
+
 async def exchange_code(config, code: str, verifier: str) -> dict:
     if not code or not verifier:
         raise CalendarAuthError("OAuth code exchange failed")
@@ -219,11 +257,15 @@ async def exchange_code(config, code: str, verifier: str) -> dict:
                     raise CalendarAuthError("OAuth code exchange failed")
     except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as error:
         raise CalendarAuthError("OAuth code exchange failed") from error
-    if not isinstance(body, dict) or not isinstance(body.get("access_token"), str):
+    if (
+        not isinstance(body, dict)
+        or not isinstance(body.get("access_token"), str)
+        or not body["access_token"]
+    ):
         raise CalendarAuthError("OAuth code exchange failed")
     scopes = set(str(body.get("scope", "")).split())
-    if CALENDAR_SCOPE not in scopes:
-        raise CalendarAuthError("Google Calendar permission was not granted")
+    if not REQUIRED_SCOPES <= scopes:
+        raise CalendarAuthError("Google Calendar and email permissions were not granted")
     refresh_token = body.get("refresh_token")
     if not isinstance(refresh_token, str) or not refresh_token:
         raise CalendarAuthError("Google did not provide a refresh token")
@@ -236,6 +278,47 @@ async def exchange_code(config, code: str, verifier: str) -> dict:
         "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat(),
         "scope": sorted(scopes),
     }
+
+
+async def fetch_account_email(access_token: str) -> str:
+    try:
+        async with aiohttp.ClientSession(timeout=HTTP_TIMEOUT) as session:
+            async with session.get(
+                USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}
+            ) as response:
+                body = await response.json(content_type=None)
+                if response.status != 200:
+                    raise CalendarAuthError("Google account identity could not be verified")
+    except (aiohttp.ClientError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise CalendarAuthError("Google account identity could not be verified") from error
+    if (
+        not isinstance(body, dict)
+        or body.get("email_verified") is not True
+        or not isinstance(body.get("email"), str)
+        or not body["email"].strip()
+    ):
+        raise CalendarAuthError("Google account identity could not be verified")
+    return body["email"].strip()
+
+
+def token_is_usable(token: dict | None) -> bool:
+    return bool(
+        isinstance(token, dict)
+        and token.get("schema_version") == 2
+        and isinstance(token.get("connection_generation"), int)
+        and not isinstance(token["connection_generation"], bool)
+        and token["connection_generation"] >= 0
+        and isinstance(token.get("account_email"), str)
+        and token["account_email"].strip()
+        and isinstance(token.get("scope"), list)
+        and REQUIRED_SCOPES <= {
+            scope for scope in token["scope"] if isinstance(scope, str)
+        }
+        and isinstance(token.get("refresh_token"), str)
+        and token["refresh_token"]
+        and isinstance(token.get("access_token"), str)
+        and token["access_token"]
+    )
 
 
 def _fernet(key: str) -> Fernet:
@@ -252,7 +335,7 @@ def save_token(data_dir: Path, user_id: int, token: dict, encryption_key: str) -
         json.dumps(token, separators=(",", ":")).encode()
     ).decode()
     _write_private_json(_token_path(data_dir, user_id), {
-        "version": 1,
+        "version": 2 if token_is_usable(token) else 1,
         "encrypted_token": encrypted,
     })
 
@@ -271,13 +354,15 @@ def load_token(data_dir: Path, user_id: int, encryption_key: str) -> dict | None
     if encrypted is None:
         save_token(data_dir, user_id, value, encryption_key)
         return value
-    if value.get("version") != 1 or not isinstance(encrypted, str):
+    if value.get("version") not in {1, 2} or not isinstance(encrypted, str):
         raise CalendarAuthError("Stored Google Calendar token is invalid")
     try:
         token = json.loads(_fernet(encryption_key).decrypt(encrypted.encode()))
     except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CalendarAuthError("Stored Google Calendar token is invalid") from error
     if not isinstance(token, dict):
+        raise CalendarAuthError("Stored Google Calendar token is invalid")
+    if value["version"] == 2 and not token_is_usable(token):
         raise CalendarAuthError("Stored Google Calendar token is invalid")
     return token
 
@@ -290,6 +375,28 @@ def disconnect(data_dir: Path, user_id: int) -> bool:
         return False
     path.unlink()
     return True
+
+
+async def disconnect_and_revoke(config, user_id: int, *, remove_user: bool = False) -> bool:
+    try:
+        token = load_token(config.data_dir, user_id, config.calendar_token_encryption_key)
+    except CalendarAuthError:
+        token = None
+    if remove_user:
+        forget_user(config.data_dir, user_id)
+        removed = token is not None
+    else:
+        removed = disconnect(config.data_dir, user_id)
+    refresh_token = token.get("refresh_token") if isinstance(token, dict) else None
+    if isinstance(refresh_token, str) and refresh_token:
+        try:
+            async with aiohttp.ClientSession(timeout=REVOKE_TIMEOUT) as session:
+                async with session.post(OAUTH_REVOKE_URL, data={"token": refresh_token}) as response:
+                    if response.status != 200:
+                        raise CalendarAuthError("Google token revocation failed")
+        except (aiohttp.ClientError, TimeoutError, CalendarAuthError):
+            pass  # Local credentials and pending authorizations are already invalidated.
+    return removed
 
 
 def forget_user(data_dir: Path, user_id: int) -> None:
@@ -369,15 +476,29 @@ def update_write(data_dir: Path, write_id: str, **updates) -> dict:
     return record
 
 
-def claim_write(data_dir: Path, write_id: str) -> dict | None:
+def claim_write(data_dir: Path, write_id: str, *, now: datetime | None = None) -> dict | None:
     record = load_write(data_dir, write_id)
     if record is None or record.get("status") not in {"pending", "creating", "failed"}:
         return None
     if write_id in ACTIVE_WRITES:
         return None
+    now = now or datetime.now(timezone.utc)
+    if record["status"] == "creating" and record.get("claimed_at") is not None:
+        try:
+            claimed_at = datetime.fromisoformat(record["claimed_at"])
+        except (TypeError, ValueError):
+            return None
+        if (
+            claimed_at.tzinfo is None
+            or now.astimezone(timezone.utc) - claimed_at.astimezone(timezone.utc) < WRITE_LEASE
+        ):
+            return None
     ACTIVE_WRITES.add(write_id)
     try:
-        return update_write(data_dir, write_id, status="creating", error=None)
+        return update_write(
+            data_dir, write_id, status="creating",
+            claimed_at=now.astimezone(timezone.utc).isoformat(), error=None,
+        )
     except Exception:
         ACTIVE_WRITES.discard(write_id)
         raise

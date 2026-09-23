@@ -35,6 +35,7 @@ from ..calendar import (
     release_write,
     replace_write_payload,
     save_token,
+    token_is_usable,
     update_write,
     oauth_is_configured,
 )
@@ -186,8 +187,8 @@ async def _execute_calendar_write(config, write: dict) -> dict:
             token = load_token(
                 config.data_dir, write["telegram_user_id"], config.calendar_token_encryption_key
             )
-            if token is None:
-                raise CalendarAuthError("Google Calendar is not connected")
+            if not token_is_usable(token):
+                raise CalendarAuthError("Reconnect Google Calendar in /settings")
             generation = write.get("connection_generation", 0)
             if (
                 connection_generation(config.data_dir, write["telegram_user_id"]) != generation
@@ -201,6 +202,7 @@ async def _execute_calendar_write(config, write: dict) -> dict:
                 )
                 if (
                     current is None
+                    or not token_is_usable(current)
                     or current.get("refresh_token") != token.get("refresh_token")
                     or connection_generation(config.data_dir, write["telegram_user_id"])
                     != write.get("connection_generation", 0)
@@ -339,13 +341,17 @@ async def reply_event(
                 token = load_token(config.data_dir, user_id, config.calendar_token_encryption_key)
             except CalendarAuthError:
                 token = None
-            if token is None:
+            if not token_is_usable(token):
                 markup = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
-                        text="Connect Google Calendar", callback_data="connect_calendar"
+                        text="Reconnect Google Calendar" if token else "Connect Google Calendar",
+                        callback_data="connect_calendar"
                     )
                 ]])
-                await _deliver(message, bot, draft, text, markup)
+                await _deliver(
+                    message, bot, draft,
+                    text + ("\n\nReconnect required." if token else ""), markup,
+                )
                 drafts.pop(user_id, None)
                 return
             try:
@@ -535,7 +541,9 @@ async def confirm_calendar_write(callback: CallbackQuery, config) -> None:
         await callback.answer("Google writes are disabled.", show_alert=True)
         await callback.message.edit_text(
             _calendar_text(write["payload"], "🕶️ Google writes are disabled."),
-            reply_markup=_calendar_markup(write["write_id"], "date" in write["payload"]["start"]),
+            reply_markup=_calendar_markup(
+                write["write_id"], "date" in write["payload"]["start"], retry=True
+            ),
         )
         return
     write = claim_write(config.data_dir, write["write_id"])

@@ -70,6 +70,16 @@ Voice and text records are kept under `data/` with private permissions.
 - [ ] Search Google Maps with Moldova bias when an event includes a location.
 - [ ] Show formatted addresses and preview links, then ask the user to choose when several places match.
 
+## Dependencies
+
+`requirements.in` lists direct runtime dependencies. `requirements.txt` is the
+hash-checked production lock file. To intentionally update it, use Python 3.12:
+
+```bash
+python -m pip install pip-tools==7.6.1
+pip-compile --generate-hashes --no-header --output-file requirements.txt requirements.in
+```
+
 ## Start
 
 1. Create configuration, then fill in `BOT_TOKEN`, `OWNER_ID`, `ELEVENLABS_API`, and `DEEPSEEK_API`:

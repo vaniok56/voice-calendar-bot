@@ -242,13 +242,19 @@ Benchmark scripts need private `data/` inputs and provider keys. Do not run expe
 
 Docker image uses a reviewed digest of `python:3.12-slim`, installs the hash-checked `requirements.txt`, copies only `bot/`, creates `/data` and `/logs`, then runs as UID/GID `1000` by default. `docker-compose.yml` bind-mounts state/logs, sets no-new-privileges, and has optional `calendar` Cloudflare tunnel profile pinned to a reviewed digest.
 
-Production deployment is manual. `DEPLOY.md` is ignored and local-only despite being present in this working tree; treat host details as sensitive operational information. No automatic deployment, release-image publishing, or health endpoint exists yet. Do not add GHCR release publishing, SBOM/provenance attestation, or CD until Branch 3 deployment-safety prerequisites are complete.
+Production deployment is manual. `DEPLOY.md` is ignored and local-only despite being present in this working tree; treat host details as sensitive operational information. Current deployment copies reviewed runtime files to Reactor and runs `docker compose up --build -d`; it restarts production services, so require explicit user approval. Verify `docker compose ps`, startup logs, and `python -m pip check` in the bot container afterward. No automatic deployment, release-image publishing, or health endpoint exists yet. Do not add GHCR release publishing, SBOM/provenance attestation, or CD until Branch 3 deployment-safety prerequisites are complete.
 
 ## GitHub Controls
 
 `main` requires current passing `test` CI, enforces rules for admins, and blocks force pushes and deletion. GitHub Actions use read-only permissions unless a job needs more. Repository settings require full commit SHA action pins and enable Dependabot security updates, secret scanning, and secret-scanning push protection. Keep third-party actions SHA-pinned with a version comment so Dependabot can update them.
 
-Do not add mandatory reviews or automatic deployment for this single-maintainer repository without explicit approval. GitHub Container Registry publication will be public and release-triggered only after Branch 3; deployed hosts must pull a reviewed immutable digest, never build mutable source on-host.
+Do not add mandatory reviews or automatic deployment for this single-maintainer repository without explicit approval. GitHub Container Registry publication will be public and release-triggered only after Branch 3; then deployed hosts must pull a reviewed immutable digest instead of building mutable source on-host.
+
+## Git And Pull Requests
+
+`main` is protected. Work on a named branch; before committing, inspect `git status`, `git diff`, and recent `git log`, then stage only intended files. Never stage private data, ignored deployment files, generated caches, or user-owned untracked plans. Push branch, create a PR, and wait for CI plus CodeQL before merging. After merge, fast-forward local `main`, delete merged local/remote branches, and verify no unintended worktree changes remain.
+
+Dependabot security-update PRs can close multiple alerts with one dependency upgrade. Review advisory scope, changelog compatibility, lock-file diff, and CI before merge; do not merge runtime-major upgrades merely because they pass tests. Query Dependabot and CodeQL alert counts after security merges.
 
 ## Documentation and Git Hygiene
 

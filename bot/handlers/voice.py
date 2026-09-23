@@ -1,7 +1,7 @@
 import json
 import logging
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -42,7 +42,9 @@ from ..calendar import (
 from ..drafts import Draft, apply_answer, next_field
 from ..extraction import extract_event
 from ..logging_config import CHISINAU
+from ..profile import ProfileError, load_profile
 from .. import semantic
+from . import calendar as settings_handler
 
 
 router = Router(name="voice")
@@ -68,7 +70,7 @@ def format_resolved(resolved: dict) -> str:
     lines = ["📅 <b>Resolved</b>"]
     if resolved.get("title"):
         lines.append(f"<b>Title:</b> {escape(resolved['title'])}")
-    lines.append(f"<b>Type:</b> {escape(str(resolved.get('event_type') or 'other'))}")
+    lines.append(f"<b>Type:</b> {escape(str(resolved.get('custom_type') or resolved.get('event_type') or 'other'))}")
     if resolved.get("all_day"):
         if resolved.get("date"):
             when = datetime.fromisoformat(resolved["date"]).strftime("%a %d %b %Y")
@@ -101,7 +103,7 @@ def format_resolved(resolved: dict) -> str:
         human = ", ".join(_human_minutes(value) for value in sorted(reminders, reverse=True))
         lines.append(f"<b>Reminders:</b> {human} before")
     if resolved.get("auto_write"):
-        lines.append("✅ Ready for automatic creation")
+        lines.append("✅ Safe to create without review when automatic writes are enabled")
     else:
         lines.append("⚠️ Needs confirmation")
     if resolved.get("errors"):
@@ -180,7 +182,7 @@ def _calendar_text(payload: dict, status: str, html_link: str | None = None) -> 
     return "\n".join(lines)
 
 
-async def _execute_calendar_write(config, write: dict) -> dict:
+async def _execute_calendar_write(config, write: dict, *, automatic: bool = False) -> dict:
     write_id = write["write_id"]
     try:
         try:
@@ -213,6 +215,15 @@ async def _execute_calendar_write(config, write: dict) -> dict:
                     config.data_dir, write["telegram_user_id"], token,
                     config.calendar_token_encryption_key,
                 )
+            if automatic:
+                try:
+                    opted_in = load_profile(
+                        config.data_dir, write["telegram_user_id"], config.calendar_timezone
+                    )["auto_write_enabled"]
+                except ProfileError:
+                    opted_in = False
+                if not opted_in:
+                    return update_write(config.data_dir, write_id, status="pending", error=None)
             event = await insert_event(token, write["payload"])
         except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:
             return update_write(config.data_dir, write_id, status="failed", error=str(error))
@@ -236,16 +247,17 @@ async def run_extraction(
     extraction_model: str,
     extraction_timeout: int,
     zone: ZoneInfo = semantic.ZONE,
+    profile: dict | None = None,
 ):
     try:
-        messages = semantic.build_messages(text, reference, zone)
+        messages = semantic.build_messages(text, reference, zone, profile)
         extraction = await extract_event(
             messages,
             api_key=deepseek_api_key,
             model=extraction_model,
             timeout=extraction_timeout,
         )
-        resolved = semantic.resolve(extraction.raw, text, reference, zone)
+        resolved = semantic.resolve(extraction.raw, text, reference, zone, profile)
         return extraction.raw, resolved, extraction.wait_time_seconds, None
     except Exception as error:
         return None, None, None, f"{type(error).__name__}: {error}"
@@ -320,6 +332,7 @@ async def reply_event(
     original_text: str | None = None,
     show_raw=False,
     config=None,
+    profile: dict | None = None,
 ) -> None:
     if error is not None:
         await message.answer(f"⚠️ Extraction failed: <code>{escape(error)}</code>")
@@ -356,11 +369,12 @@ async def reply_event(
                 return
             try:
                 payload = build_event(
-                    resolved, new_google_event_id(), config.calendar_timezone
+                    resolved, new_google_event_id(), (profile or {}).get("timezone", config.calendar_timezone)
                 )
                 write = create_write(
                     config.data_dir, user_id, _source_record(record_path, config), payload,
                     connection=connection_generation(config.data_dir, user_id),
+                    timezone_name=(profile or {}).get("timezone", config.calendar_timezone),
                 )
             except CalendarPayloadError as error:
                 await _deliver(
@@ -379,20 +393,27 @@ async def reply_event(
                 )
                 drafts.pop(user_id, None)
                 return
-            if resolved.get("auto_write"):
+            try:
+                opted_in = load_profile(config.data_dir, user_id, config.calendar_timezone)["auto_write_enabled"]
+            except ProfileError:
+                opted_in = False
+            if resolved.get("auto_write") and opted_in:
                 write = claim_write(config.data_dir, write["write_id"])
                 if write is None:
                     raise CalendarPayloadError("Calendar write could not be started")
-                write = await _execute_calendar_write(config, write)
+                write = await _execute_calendar_write(config, write, automatic=True)
                 if write["status"] == "created":
                     status = "✅ Created"
+                elif write["status"] == "pending":
+                    status = "Automatic writes off; confirm to create."
                 else:
                     status = "⚠️ Google Calendar creation failed. Confirm to retry."
                 await _deliver(
                     message, bot, draft,
                     _calendar_text(write["payload"], status, write.get("google_html_link")),
                     None if write["status"] == "created" else _calendar_markup(
-                        write["write_id"], resolved.get("all_day", False), retry=True
+                        write["write_id"], resolved.get("all_day", False),
+                        retry=write["status"] == "failed"
                     ),
                 )
                 drafts.pop(user_id, None)
@@ -401,7 +422,7 @@ async def reply_event(
                 message,
                 bot,
                 draft,
-                text,
+                text + ("\n\nAutomatic writes off; confirm to create." if resolved.get("auto_write") else ""),
                 _calendar_markup(write["write_id"], resolved.get("all_day", False)),
             )
             drafts.pop(user_id, None)
@@ -419,7 +440,8 @@ async def reply_event(
             reference=reference,
             awaiting=field,
             record_path=record_path,
-            timezone=config.calendar_timezone if config is not None else "Europe/Chisinau",
+            timezone=(profile or {}).get("timezone", config.calendar_timezone if config is not None else "Europe/Chisinau"),
+            profile=deepcopy(profile),
         )
         drafts[user_id] = draft
     elif draft.attempts >= 6:
@@ -464,7 +486,7 @@ async def _answer_draft(
     except ValueError as error:
         draft.attempts += 1
         resolved = semantic.resolve(
-            draft.raw, "\n".join(draft.evidence), draft.reference, ZoneInfo(draft.timezone)
+            draft.raw, "\n".join(draft.evidence), draft.reference, ZoneInfo(draft.timezone), draft.profile
         )
         _update_record(
             draft.record_path,
@@ -499,7 +521,7 @@ async def _answer_draft(
     )
     await reply_event(
         message, bot, drafts, user_id, draft.raw, resolved, None,
-        record_path=draft.record_path, show_raw=show_raw, config=config,
+        record_path=draft.record_path, show_raw=show_raw, config=config, profile=draft.profile,
     )
 
 
@@ -583,7 +605,10 @@ async def start_calendar_edit(callback: CallbackQuery, config) -> None:
 
 
 @router.callback_query(F.data.startswith("edit_field:"))
-async def choose_calendar_edit(callback: CallbackQuery, config, calendar_edits) -> None:
+async def choose_calendar_edit(callback: CallbackQuery, config, calendar_edits, settings_edits=None) -> None:
+    if settings_edits and settings_edits.get(callback.from_user.id, {}).get("field"):
+        await callback.answer("Finish or cancel settings input first.", show_alert=True)
+        return
     try:
         _, write_id, field = callback.data.split(":", 2)
     except ValueError:
@@ -655,7 +680,8 @@ async def _answer_calendar_edit(message, bot, calendar_edits, config) -> None:
             calendar_edits.pop(message.from_user.id, None)
             raise CalendarPayloadError("Calendar write was not found")
         payload = edit_payload(
-            write["payload"], pending["field"], message.text, config.calendar_timezone
+            write["payload"], pending["field"], message.text,
+            write.get("timezone") or config.calendar_timezone
         )
         write = replace_write_payload(config.data_dir, write["write_id"], payload)
     except CalendarPayloadError as error:
@@ -688,6 +714,7 @@ async def handle_voice(
     debug: bool,
     config=None,
     calendar_edits=None,
+    settings_edits=None,
 ) -> None:
     user_id = message.from_user.id if message.from_user else 0
     if drafts.get(user_id) is not None:
@@ -696,6 +723,13 @@ async def handle_voice(
     if calendar_edits and user_id in calendar_edits:
         await message.answer("Please reply with text while editing a Calendar event.")
         return
+    if settings_edits and settings_edits.get(user_id, {}).get("field"):
+        state = settings_edits[user_id]
+        if datetime.now(timezone.utc) >= state["expires_at"]:
+            state["field"] = None
+        else:
+            await message.answer("Please reply with text while editing settings, or tap Back.")
+            return
 
     voice = message.voice
     if voice is None or voice.file_size is None or voice.file_size <= 0:
@@ -706,7 +740,12 @@ async def handle_voice(
         await message.answer("Voice message exceeds the 2 MiB limit.")
         return
 
-    received_at = datetime.now(ZoneInfo(config.calendar_timezone) if config else CHISINAU)
+    try:
+        profile = load_profile(config.data_dir, user_id, config.calendar_timezone) if config else None
+    except ProfileError as error:
+        await message.answer(f"⚠️ {escape(str(error))} Open /settings for details.")
+        return
+    received_at = datetime.now(ZoneInfo(profile["timezone"]) if profile else CHISINAU)
     record_dir = voice_root / str(user_id) / str(message.message_id)
     try:
         record_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -723,6 +762,7 @@ async def handle_voice(
         "language_code": None,
         "extraction_model": extraction_model,
         "contract_hash": semantic.contract_hash(),
+        "profile_snapshot": deepcopy(profile),
         "extraction": None,
         "effective_extraction": None,
         "resolved": None,
@@ -748,7 +788,8 @@ async def handle_voice(
             deepseek_api_key=deepseek_api_key,
             extraction_model=extraction_model,
             extraction_timeout=extraction_timeout,
-            zone=ZoneInfo(config.calendar_timezone) if config else semantic.ZONE,
+            zone=ZoneInfo(profile["timezone"]) if profile else semantic.ZONE,
+            profile=profile,
         )
         if extraction_error is not None:
             log.error(
@@ -798,6 +839,7 @@ async def handle_voice(
             original_text=result.text,
             show_raw=debug,
             config=config,
+            profile=profile,
         )
 
         if debug:
@@ -835,11 +877,16 @@ async def handle_text(
     debug: bool,
     config=None,
     calendar_edits=None,
+    settings_edits=None,
 ) -> None:
     user_id = message.from_user.id if message.from_user else 0
 
     if calendar_edits is not None and user_id in calendar_edits:
         await _answer_calendar_edit(message, bot, calendar_edits, config)
+        return
+
+    if settings_edits is not None and user_id in settings_edits and settings_edits[user_id].get("field"):
+        await settings_handler.answer_settings(message, bot, config, settings_edits)
         return
 
     draft = drafts.get(user_id)
@@ -849,7 +896,12 @@ async def handle_text(
         )
         return
 
-    received_at = datetime.now(ZoneInfo(config.calendar_timezone) if config else CHISINAU)
+    try:
+        profile = load_profile(config.data_dir, user_id, config.calendar_timezone) if config else None
+    except ProfileError as error:
+        await message.answer(f"⚠️ {escape(str(error))} Open /settings for details.")
+        return
+    received_at = datetime.now(ZoneInfo(profile["timezone"]) if profile else CHISINAU)
     record_dir = text_root / str(user_id) / str(message.message_id)
     try:
         record_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -864,6 +916,7 @@ async def handle_text(
         "text": message.text,
         "extraction_model": extraction_model,
         "contract_hash": semantic.contract_hash(),
+        "profile_snapshot": deepcopy(profile),
         "extraction": None,
         "effective_extraction": None,
         "resolved": None,
@@ -882,7 +935,8 @@ async def handle_text(
             deepseek_api_key=deepseek_api_key,
             extraction_model=extraction_model,
             extraction_timeout=extraction_timeout,
-            zone=ZoneInfo(config.calendar_timezone) if config else semantic.ZONE,
+            zone=ZoneInfo(profile["timezone"]) if profile else semantic.ZONE,
+            profile=profile,
         )
         record.update(
             status="completed",
@@ -918,6 +972,7 @@ async def handle_text(
             original_text=message.text,
             show_raw=debug,
             config=config,
+            profile=profile,
         )
         if debug:
             await message.answer(

@@ -1,5 +1,6 @@
 import unittest
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from bot import semantic
 from benchmarks.llm import semantic_benchmark
@@ -29,6 +30,37 @@ def empty(**updates):
 
 class TestSemanticResolver(unittest.TestCase):
     REFERENCE = datetime(2026, 9, 18, 12, 0, tzinfo=semantic.ZONE)
+
+    def test_profile_duration_and_custom_type_grounding(self):
+        profile = {"type_durations": {"meeting": 45}, "custom_types": [
+            {"id": "gym123456", "type": "Gym", "duration_minutes": 90},
+        ]}
+        raw = empty()
+        raw["date"].update(kind="relative", source="tomorrow", offset_days=1)
+        raw["time"].update(kind="clock", source="09:00", hour=9, minute=0, meridiem="24h")
+        text = "sync workout tomorrow 09:00"
+        builtin = semantic.resolve(raw, text, self.REFERENCE, profile=profile)
+        self.assertEqual((builtin["duration_minutes"], builtin["duration_origin"]), (45, "profile_builtin"))
+        custom_raw = {**raw, "custom_type_id": "gym123456", "custom_type_source": "workout"}
+        custom = semantic.resolve(custom_raw, text, self.REFERENCE, profile=profile)
+        self.assertEqual((custom["duration_minutes"], custom["duration_origin"], custom["custom_type"]),
+                         (90, "profile_custom", "Gym"))
+        self.assertTrue(custom["auto_write"])
+        explicit = semantic.resolve({**custom_raw, "duration_minutes": 20, "duration_source": "20 minutes"},
+                                    text + " 20 minutes", self.REFERENCE, profile=profile)
+        self.assertEqual((explicit["duration_minutes"], explicit["duration_origin"]), (20, "explicit"))
+        for change, risk in (({"custom_type_id": "unknown"}, "unknown_custom_type"),
+                             ({"custom_type_source": "not spoken"}, "ungrounded_custom_type")):
+            invalid = semantic.resolve({**custom_raw, **change}, text, self.REFERENCE, profile=profile)
+            self.assertIn(risk, invalid["errors"] + invalid["risks"])
+            self.assertFalse(invalid["auto_write"])
+        trip = semantic.resolve({**custom_raw, "event_type": "trip"}, text, self.REFERENCE,
+                                ZoneInfo("Asia/Tokyo"), profile)
+        self.assertEqual(trip["duration_origin"], "builtin")
+        self.assertEqual(trip["duration_minutes"], 900)
+        birthday = semantic.resolve({**custom_raw, "event_type": "birthday"}, text, self.REFERENCE,
+                                    profile=profile)
+        self.assertIsNone(birthday["duration_minutes"])
 
     def test_prompt_classifies_russian_task_intent_as_create(self):
         self.assertIn(
@@ -176,7 +208,9 @@ class TestSemanticResolver(unittest.TestCase):
         )
         for risk in ("weekday", "explicit_duration", "end_time"):
             self.assertNotIn(risk, result["risks"])
-        self.assertTrue(result["auto_write"])
+        self.assertFalse(result["auto_write"])
+        self.assertIn("end_time_duration_conflict", result["risks"])
+        self.assertEqual(result["duration_minutes"], 60)
 
     def test_one_grounded_reminder_can_auto_write(self):
         raw = empty(reminders=[{"source": "15 minutes before", "minutes": 15}])

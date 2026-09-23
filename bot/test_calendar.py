@@ -37,16 +37,102 @@ from .calendar import (
     update_write,
 )
 from .handlers.calendar import (
+    _settings_view,
+    answer_settings,
     cancel_connect,
+    cancel_disconnect_calendar_button,
+    confirm_disconnect_calendar_button,
     connect_calendar_button,
     disconnect_calendar_button,
     google_callback,
     settings,
+    preferences,
 )
+from .profile import ProfileConflict, ProfileError, load_profile, save_profile
 
 
 EVENT_ID = "a1234"
 TOKEN_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+
+
+class TestProfiles(unittest.TestCase):
+    def test_private_profile_conflict_and_invalid_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = load_profile(root, 42, "Asia/Tokyo")
+            self.assertEqual(profile["timezone"], "Asia/Tokyo")
+            self.assertFalse(profile["auto_write_enabled"])
+            path = root / "google-calendar" / "profiles" / "42.json"
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            profile["auto_write_enabled"] = True
+            saved = save_profile(root, 42, "Asia/Tokyo", profile)
+            self.assertEqual(saved["revision"], 2)
+            with self.assertRaises(ProfileConflict):
+                save_profile(root, 42, "Asia/Tokyo", profile)
+            path.write_text('{"version": 99}')
+            with self.assertRaises(ProfileError):
+                load_profile(root, 42, "Asia/Tokyo")
+
+    def test_settings_custom_type_wizard_and_builtin_grid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(data_dir=Path(directory), calendar_timezone="Europe/Chisinau",
+                                     google_oauth_client_id=None, google_oauth_client_secret=None,
+                                     google_oauth_redirect_uri=None)
+            message = MagicMock()
+            message.from_user.id = 42
+            message.answer = AsyncMock(return_value=SimpleNamespace(chat=SimpleNamespace(id=42), message_id=5))
+            bot = SimpleNamespace(delete_message=AsyncMock(), edit_message_text=AsyncMock())
+            state = {}
+            asyncio.run(settings(message, bot, config, {}, settings_edits=state, drafts={}, calendar_edits={}))
+            callback = MagicMock()
+            callback.from_user.id = 42
+            callback.message.chat.id = 42
+            callback.message.message_id = 5
+            callback.message.edit_text = AsyncMock()
+            callback.answer = AsyncMock()
+            for action in ("pref:builtins", "pref:customs", "pref:add"):
+                callback.data = action
+                asyncio.run(preferences(callback, config, state, {}, {}))
+            builtins_markup = callback.message.edit_text.await_args_list[0].kwargs["reply_markup"]
+            self.assertEqual(len(builtins_markup.inline_keyboard[0]), 2)
+            self.assertEqual(state[42]["field"], "custom_name")
+            self.assertEqual([button.text for row in callback.message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+                              for button in row], ["Back"])
+            message.text = "Gym"
+            asyncio.run(answer_settings(message, bot, config, state))
+            message.text = "90"
+            asyncio.run(answer_settings(message, bot, config, state))
+            profile = load_profile(config.data_dir, 42, config.calendar_timezone)
+            self.assertEqual(profile["custom_types"][0]["type"], "Gym")
+            self.assertEqual(profile["custom_types"][0]["duration_minutes"], 90)
+            self.assertEqual(state[42]["view"], "customs")
+
+    def test_settings_status_is_per_user_and_prompts_have_one_back(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = SimpleNamespace(data_dir=Path(directory), calendar_timezone="Europe/Chisinau",
+                                     google_oauth_client_id=None, google_oauth_client_secret=None,
+                                     google_oauth_redirect_uri=None, calendar_write_enabled=True)
+            text, _ = _settings_view(42, config)
+            self.assertIn("Automatic writes: Off ❌", text)
+            self.assertNotIn("Google writes:", text)
+            profile = load_profile(config.data_dir, 42, config.calendar_timezone)
+            profile["auto_write_enabled"] = True
+            save_profile(config.data_dir, 42, config.calendar_timezone, profile)
+            self.assertIn("Automatic writes: On ✅", _settings_view(42, config)[0])
+            callback = MagicMock()
+            callback.from_user.id = 42
+            callback.message.chat.id = 42
+            callback.message.message_id = 5
+            callback.message.edit_text = AsyncMock()
+            callback.answer = AsyncMock()
+            edits = {42: {"chat_id": 42, "message_id": 5, "view": "main", "field": None,
+                          "revision": 2}}
+            for action in ("pref:zone", "pref:back", "pref:builtins", "pref:built:meeting"):
+                callback.data = action
+                asyncio.run(preferences(callback, config, edits, {}, {}))
+                if action in {"pref:zone", "pref:built:meeting"}:
+                    markup = callback.message.edit_text.await_args.kwargs["reply_markup"]
+                    self.assertEqual([button.text for row in markup.inline_keyboard for button in row], ["Back"])
 
 
 class TestCalendarPayload(unittest.TestCase):
@@ -470,7 +556,7 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             self.assertEqual(messages[123], (123, 457))
 
     @patch("bot.calendar.aiohttp.ClientSession")
-    def test_disconnect_button_removes_token(self, client_session):
+    def test_disconnect_requires_confirmation_and_back_preserves_token(self, client_session):
         client_session.return_value = TestCalendarWrites().session(TestCalendarWrites().response(200, {}))
         with tempfile.TemporaryDirectory() as directory:
             config = self.config(directory)
@@ -478,14 +564,29 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             save_token(config.data_dir, 123, {"refresh_token": "refresh"}, TOKEN_KEY)
             callback = MagicMock()
             callback.from_user.id = 123
+            callback.message.chat.id = 123
+            callback.message.message_id = 456
             callback.answer = AsyncMock()
             callback.message.edit_text = AsyncMock()
-            asyncio.run(disconnect_calendar_button(callback, config, {}))
+            edits = {123: {"chat_id": 123, "message_id": 456, "view": "main", "field": None}}
+            asyncio.run(disconnect_calendar_button(callback, config, edits))
+            self.assertIsNotNone(load_token(config.data_dir, 123, TOKEN_KEY))
+            self.assertIn("Disconnect Google Calendar?", callback.message.edit_text.await_args.args[0])
+            self.assertEqual(edits[123]["view"], "disconnect_confirm")
+            asyncio.run(cancel_disconnect_calendar_button(callback, config, edits))
+            self.assertIsNotNone(load_token(config.data_dir, 123, TOKEN_KEY))
+            asyncio.run(confirm_disconnect_calendar_button(callback, config, edits))
+            self.assertIsNotNone(load_token(config.data_dir, 123, TOKEN_KEY))
+            asyncio.run(disconnect_calendar_button(callback, config, edits))
+            asyncio.run(confirm_disconnect_calendar_button(callback, config, edits))
             self.assertIsNone(load_token(config.data_dir, 123, TOKEN_KEY))
             text = callback.message.edit_text.await_args.args[0]
             self.assertIn("Not connected", text)
             buttons = callback.message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
             self.assertEqual(buttons[0][0].text, "Connect")
+            self.assertEqual(edits[123]["view"], "main")
+            asyncio.run(confirm_disconnect_calendar_button(callback, config, edits))
+            self.assertEqual(connection_generation(config.data_dir, 123), 1)
 
 
 class TestCalendarWrites(unittest.TestCase):

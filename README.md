@@ -2,28 +2,41 @@
 
 Private aiogram bot that turns a voice message or plain text into a per-user Google Calendar event, with owner-managed access, admin ranks, file logging, and Docker deployment.
 
-Allowed users send a voice message or plain text. Voice is transcribed with ElevenLabs Scribe v2; plain text skips ASR. DeepSeek converts the text into semantic JSON once, and deterministic code resolves date arithmetic, time, duration, defaults, reminders, recurrence, grounding, and timezone (`Europe/Chisinau`). The bot then shows an event card. If a required field is missing, it asks one focused deterministic question at a time. Clarifications do not call DeepSeek again: dates accept `YYYY-MM-DD` or quick replies, times accept `HH:MM` or quick replies, and voice clarification replies are rejected. The card and each question live in a single message that is edited in place as the draft evolves.
+Allowed users send a voice message or plain text. Voice is transcribed with ElevenLabs Scribe v2; plain text skips ASR. DeepSeek converts the text into semantic JSON once, and deterministic code resolves date arithmetic, time, duration, defaults, reminders, recurrence, grounding, and each user's timezone. The bot then shows an event card. If a required field is missing, it asks one focused deterministic question at a time. Clarifications do not call DeepSeek again: dates accept `YYYY-MM-DD` or quick replies, times accept `HH:MM` or quick replies, and voice clarification replies are rejected. The card and each question live in a single message that is edited in place as the draft evolves.
+
+Timezone and duration defaults now come from each user's private profile, initially
+seeded from `CALENDAR_TIMEZONE`. Custom types can match semantically (e.g. workout
+→ Gym); their durations apply unless the request specifies an end time or duration.
 
 `auto_write` is an eligibility result. It means
 the request is a complete, grounded create with no remaining confirmation risk.
 Grounded named weekdays, explicit durations, and explicit end times are
 eligible. A named weekday means its next occurrence; on that weekday, it means
 seven days later. Locations, recurrence, corrections, multiple reminders, past
-starts, unknown operations, ungrounded fields, and DST ambiguity require review.
+starts, unknown operations, ungrounded fields, conflicting end time and duration,
+and DST ambiguity require review.
 
 Each user connects their own Google Calendar through `/settings` and its
 inline authorization button. Each `/settings` moves the card to the bottom of chat
 and removes the previous card when Telegram permits. Connect shows the OAuth link
 on the card; Back invalidates the link and restores settings. A successful Google
 callback updates the card and sends a private confirmation. `/settings` shows the
-connected email, Calendar status, and configured timezone. Existing
+connected email, Calendar status, automatic-write preference, user timezone, and
+two-column Built-in durations and Custom types submenus. Tap a type to change its
+duration; add a custom type by replying with its name and then duration in minutes.
+Timezone edits take exact IANA names (e.g. `Europe/Chisinau`). Settings text flows
+expire after ten minutes. Enabling automatic writes requires explicit confirmation.
+Existing
 connections must reconnect to grant email identity access; old tokens cannot
-write events. Disconnect tries to revoke the Google refresh token and always
-removes the local credential. With
+write events. Disconnect asks for confirmation, then tries to revoke the Google
+refresh token and removes the local credential. Admins see the global Google
+writes switch in `/admin_help`; it is not shown in `/settings`. With
 `CALENDAR_WRITE_ENABLED=false`, the bot stores normalized payloads in shadow
-mode and never calls Google. With writes enabled, `auto_write=true` events are
-created immediately; other complete events carry `Confirm`, `Edit`, and
-`Cancel`. `Edit` supports title, date, and time before creation.
+mode and never calls Google. With writes enabled, complete events offer manual
+`Confirm`, `Edit`, and `Cancel` by default. Only opted-in users' safe, complete
+events are created immediately; risky or incomplete events never bypass review.
+`Edit` supports title, date, and time before creation. User profile lives in
+`data/google-calendar/profiles/<user_id>.json` with private permissions.
 
 Voice and text records are kept under `data/` with private permissions.
 
@@ -31,8 +44,8 @@ Voice and text records are kept under `data/` with private permissions.
 
 - `/start` - verify bot is running.
 - `/help` - show usage information.
-- `/settings` - view Calendar connection, account email, and timezone; connect, switch accounts, or disconnect.
-- `/admin_help` - show administration commands.
+- `/settings` - manage Calendar account, automatic writes, timezone, built-in durations, and custom types.
+- `/admin_help` - show administration commands and global Google writes status (admins only).
 - `/list_users` - open paginated user list with removal controls.
 - `/adduser <user_id>` - add user.
 - `/add_admin <user_id>` - promote user; owner only.
@@ -69,7 +82,7 @@ Voice and text records are kept under `data/` with private permissions.
 ### Next
 
 - [ ] Complete production shadow-mode payload review.
-- [ ] Add `/settings`: Calendar status, per-user auto-write opt-in, timezone, built-in type-duration overrides, and automatic custom types with durations.
+- [ ] Review Branch 2 `/settings` flow and per-user profile behavior in practice.
 - [ ] Enable global Calendar writes with per-user auto-write disabled, allowing manual `Confirm` writes only.
 - [ ] Canary per-user automatic creation; retain `CALENDAR_WRITE_ENABLED` as global rollback.
 - [ ] Reassess incremental editor fields from production usage.

@@ -88,9 +88,11 @@ def _list_view(storage: Storage, page: int) -> tuple[str, InlineKeyboardMarkup]:
 
 
 @router.message(Command("admin_help"))
-async def admin_help(message: Message, storage: Storage) -> None:
+async def admin_help(message: Message, storage: Storage, config) -> None:
     if message.from_user and storage.is_admin(message.from_user.id):
-        await message.answer(ADMIN_HELP)
+        await message.answer(
+            ADMIN_HELP + f"\n\nGoogle writes: {'On ✅' if config.calendar_write_enabled else 'Off ❌ (shadow mode)'}"
+        )
 
 
 @router.message(Command("list_users"))

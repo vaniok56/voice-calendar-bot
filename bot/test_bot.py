@@ -129,6 +129,17 @@ class TestConfig(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "EXTRACTION_TIMEOUT"):
             load_config()
 
+    @patch("bot.config.load_dotenv")
+    @patch.dict(os.environ, {
+        "BOT_TOKEN": "123:ABC", "OWNER_ID": "999", "ELEVENLABS_API": "eleven",
+        "DEEPSEEK_API": "deepseek", "GOOGLE_OAUTH_CLIENT_ID": "client",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "secret",
+        "GOOGLE_OAUTH_REDIRECT_URI": "https://calendar.example.com/callback",
+    }, clear=True)
+    def test_load_config_requires_calendar_token_key(self, _mock_dotenv):
+        with self.assertRaisesRegex(RuntimeError, "CALENDAR_TOKEN_ENCRYPTION_KEY"):
+            load_config()
+
 
 class TestExtraction(unittest.TestCase):
     def test_request_body_uses_deepseek_contract(self):
@@ -344,6 +355,7 @@ class TestReplyFlow(unittest.TestCase):
             google_oauth_client_id="client",
             google_oauth_client_secret="secret",
             google_oauth_redirect_uri="https://calendar.example.com/google/callback",
+            calendar_token_encryption_key="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
         )
 
     def calendar_record_path(self, directory):
@@ -357,7 +369,7 @@ class TestReplyFlow(unittest.TestCase):
         resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
         with tempfile.TemporaryDirectory() as directory:
             config = self.calendar_config(directory, False)
-            save_token(config.data_dir, 1, {"access_token": "access"})
+            save_token(config.data_dir, 1, {"access_token": "access"}, config.calendar_token_encryption_key)
             message = self.message()
             asyncio.run(reply_event(
                 message, MagicMock(), {}, 1, raw, resolved, None,
@@ -379,7 +391,7 @@ class TestReplyFlow(unittest.TestCase):
                 "access_token": "access", "refresh_token": "refresh",
                 "expires_at": "2099-01-01T00:00:00+00:00",
                 "connection_generation": 0,
-            })
+            }, config.calendar_token_encryption_key)
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,
                 record_path=self.calendar_record_path(directory), config=config,
@@ -396,7 +408,7 @@ class TestReplyFlow(unittest.TestCase):
                 "access_token": "access", "refresh_token": "refresh",
                 "expires_at": "2099-01-01T00:00:00+00:00",
                 "connection_generation": 1,
-            })
+            }, config.calendar_token_encryption_key)
             message = self.message()
             asyncio.run(reply_event(
                 message, MagicMock(), {}, 1, raw, resolved, None,
@@ -417,7 +429,7 @@ class TestReplyFlow(unittest.TestCase):
                 "access_token": "access", "refresh_token": "refresh",
                 "expires_at": "2099-01-01T00:00:00+00:00",
                 "connection_generation": 0,
-            })
+            }, config.calendar_token_encryption_key)
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,
                 record_path=self.calendar_record_path(directory), config=config,

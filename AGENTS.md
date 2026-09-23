@@ -115,7 +115,7 @@ Calendar OAuth is per Telegram user. Scope is `calendar.events.owned` only. OAut
 - Connecting, reconnecting, or disconnecting advances generation.
 - Callback verifies user still has access and generation matches before saving token.
 - Writes record generation. Any changed connection rejects old write before token refresh or Google insertion.
-- Never log, show, or persist OAuth authorization codes. Keep OAuth client/tunnel secrets only in private `.env`; keep access/refresh tokens only in private token files; state files contain state metadata and PKCE verifier only.
+- Never log, show, or persist OAuth authorization codes. Keep OAuth client/tunnel secrets only in private `.env`; encrypt access/refresh token files with `CALENDAR_TOKEN_ENCRYPTION_KEY`; state files contain state metadata and PKCE verifier only. Existing plaintext token files migrate on their next read.
 
 `build_event()` owns Google payload conversion:
 
@@ -183,7 +183,7 @@ CALENDAR_WRITE_ENABLED=false      CALENDAR_CALLBACK_PORT=8080
 CALENDAR_TIMEZONE=Europe/Chisinau
 ```
 
-OAuth values are required only when `CALENDAR_WRITE_ENABLED=true`; callback server can still start when OAuth credentials exist but writes remain disabled for shadow review.
+OAuth values are required only when `CALENDAR_WRITE_ENABLED=true`; callback server can still start when OAuth credentials exist but writes remain disabled for shadow review. Whenever all OAuth values are configured, `CALENDAR_TOKEN_ENCRYPTION_KEY` must be a valid Fernet key held only in private `.env`.
 
 `HOST_UID`, `HOST_GID`, and `CALENDAR_TUNNEL_TOKEN` are Compose deployment values. Keep exact variable names. Runtime uses `ELEVENLABS_API`; ASR cloud benchmark currently separately expects misspelled legacy `ELLEVENLABS_API`.
 

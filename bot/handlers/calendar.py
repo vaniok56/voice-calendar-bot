@@ -75,7 +75,7 @@ async def google_callback(request: web.Request) -> web.Response:
             return web.Response(text="Google Calendar connection could not be completed.", status=400)
         save_token(config.data_dir, pending["telegram_user_id"], {
             **token, "connection_generation": pending["connection_generation"],
-        })
+        }, config.calendar_token_encryption_key)
     except CalendarAuthError:
         return web.Response(text="Google Calendar connection could not be completed.", status=400)
     return web.Response(text="Google Calendar connected. Return to Telegram.")

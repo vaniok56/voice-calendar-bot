@@ -1,4 +1,5 @@
 aiogram>=3.31.0,<4
 aiohttp>=3.14.3,<4
+cryptography>=46.0.5,<47
 python-dotenv>=1.2.3,<2
 websockets>=17.1,<18

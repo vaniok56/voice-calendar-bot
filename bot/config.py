@@ -4,6 +4,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class Config:
     google_oauth_client_id: str
     google_oauth_client_secret: str
     google_oauth_redirect_uri: str
+    calendar_token_encryption_key: str
     calendar_callback_port: int
     calendar_timezone: str
 
@@ -101,10 +103,18 @@ def load_config() -> Config:
     google_oauth_client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
     google_oauth_client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
     google_oauth_redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+    calendar_token_encryption_key = os.environ.get("CALENDAR_TOKEN_ENCRYPTION_KEY", "").strip()
     if calendar_write_enabled and not all((
         google_oauth_client_id, google_oauth_client_secret, google_oauth_redirect_uri,
     )):
         raise RuntimeError("Google OAuth configuration is required when CALENDAR_WRITE_ENABLED=true")
+    if all((google_oauth_client_id, google_oauth_client_secret, google_oauth_redirect_uri)):
+        if not calendar_token_encryption_key:
+            raise RuntimeError("CALENDAR_TOKEN_ENCRYPTION_KEY is required with Google OAuth")
+        try:
+            Fernet(calendar_token_encryption_key.encode())
+        except ValueError as error:
+            raise RuntimeError("CALENDAR_TOKEN_ENCRYPTION_KEY must be a valid Fernet key") from error
 
     return Config(
         bot_token=token,
@@ -125,6 +135,7 @@ def load_config() -> Config:
         google_oauth_client_id=google_oauth_client_id,
         google_oauth_client_secret=google_oauth_client_secret,
         google_oauth_redirect_uri=google_oauth_redirect_uri,
+        calendar_token_encryption_key=calendar_token_encryption_key,
         calendar_callback_port=calendar_callback_port,
         calendar_timezone=calendar_timezone,
     )

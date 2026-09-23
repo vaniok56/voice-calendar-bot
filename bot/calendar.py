@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
 from copy import deepcopy
@@ -10,6 +11,7 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
+from cryptography.fernet import Fernet, InvalidToken
 
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.owned"
@@ -68,7 +70,21 @@ def _write_private_json(path: Path, value: dict) -> None:
 def _state_path(data_dir: Path, state: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", state):
         raise CalendarAuthError("Invalid OAuth state")
-    return _calendar_root(data_dir) / "states" / f"{state}.json"
+    return _safe_path(_calendar_root(data_dir) / "states", f"{state}.json")
+
+
+def _safe_path(parent: Path, filename: str) -> Path:
+    parent = Path(os.path.realpath(parent))
+    path = Path(os.path.realpath(parent / filename))
+    if path.parent != parent:
+        raise CalendarAuthError("Invalid calendar storage path")
+    return path
+
+
+def _calendar_user_path(data_dir: Path, directory: str, user_id: int) -> Path:
+    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
+        raise CalendarAuthError("Invalid Telegram user")
+    return _safe_path(_calendar_root(data_dir) / directory, f"{user_id}.json")
 
 
 def _clear_user_states(data_dir: Path, user_id: int) -> None:
@@ -95,13 +111,11 @@ def _prune_expired_states(data_dir: Path, now: datetime) -> None:
 
 
 def _token_path(data_dir: Path, user_id: int) -> Path:
-    if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
-        raise CalendarAuthError("Invalid Telegram user")
-    return _calendar_root(data_dir) / "tokens" / f"{user_id}.json"
+    return _calendar_user_path(data_dir, "tokens", user_id)
 
 
 def _connection_path(data_dir: Path, user_id: int) -> Path:
-    return _calendar_root(data_dir) / "connections" / f"{user_id}.json"
+    return _calendar_user_path(data_dir, "connections", user_id)
 
 
 def connection_generation(data_dir: Path, user_id: int) -> int:
@@ -224,11 +238,26 @@ async def exchange_code(config, code: str, verifier: str) -> dict:
     }
 
 
-def save_token(data_dir: Path, user_id: int, token: dict) -> None:
-    _write_private_json(_token_path(data_dir, user_id), token)
+def _fernet(key: str) -> Fernet:
+    try:
+        return Fernet(key.encode())
+    except (AttributeError, ValueError) as error:
+        raise CalendarAuthError("Calendar token encryption is invalid") from error
 
 
-def load_token(data_dir: Path, user_id: int) -> dict | None:
+def save_token(data_dir: Path, user_id: int, token: dict, encryption_key: str) -> None:
+    if not isinstance(token, dict):
+        raise CalendarAuthError("Stored Google Calendar token is invalid")
+    encrypted = _fernet(encryption_key).encrypt(
+        json.dumps(token, separators=(",", ":")).encode()
+    ).decode()
+    _write_private_json(_token_path(data_dir, user_id), {
+        "version": 1,
+        "encrypted_token": encrypted,
+    })
+
+
+def load_token(data_dir: Path, user_id: int, encryption_key: str) -> dict | None:
     path = _token_path(data_dir, user_id)
     if not path.exists():
         return None
@@ -238,7 +267,19 @@ def load_token(data_dir: Path, user_id: int) -> dict | None:
         raise CalendarAuthError("Stored Google Calendar token is invalid") from error
     if not isinstance(value, dict):
         raise CalendarAuthError("Stored Google Calendar token is invalid")
-    return value
+    encrypted = value.get("encrypted_token")
+    if encrypted is None:
+        save_token(data_dir, user_id, value, encryption_key)
+        return value
+    if value.get("version") != 1 or not isinstance(encrypted, str):
+        raise CalendarAuthError("Stored Google Calendar token is invalid")
+    try:
+        token = json.loads(_fernet(encryption_key).decrypt(encrypted.encode()))
+    except (InvalidToken, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CalendarAuthError("Stored Google Calendar token is invalid") from error
+    if not isinstance(token, dict):
+        raise CalendarAuthError("Stored Google Calendar token is invalid")
+    return token
 
 
 def disconnect(data_dir: Path, user_id: int) -> bool:

@@ -29,6 +29,7 @@ from .calendar import (
 
 
 EVENT_ID = "a1234"
+TOKEN_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 
 class TestCalendarPayload(unittest.TestCase):
@@ -139,12 +140,27 @@ class TestCalendarOAuthStorage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             token = {"access_token": "access", "refresh_token": "refresh"}
-            save_token(root, 123, token)
+            save_token(root, 123, token, TOKEN_KEY)
             path = root / "google-calendar" / "tokens" / "123.json"
-            self.assertEqual(load_token(root, 123), token)
+            self.assertEqual(load_token(root, 123, TOKEN_KEY), token)
+            self.assertNotIn("refresh", path.read_text(encoding="utf-8"))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertTrue(disconnect(root, 123))
-            self.assertIsNone(load_token(root, 123))
+            self.assertIsNone(load_token(root, 123, TOKEN_KEY))
+
+    def test_plaintext_token_migrates_on_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "google-calendar" / "tokens" / "123.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"refresh_token":"legacy"}', encoding="utf-8")
+            self.assertEqual(load_token(root, 123, TOKEN_KEY), {"refresh_token": "legacy"})
+            self.assertNotIn("legacy", path.read_text(encoding="utf-8"))
+
+    def test_rejects_invalid_user_id_for_connection_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(CalendarAuthError):
+                connection_generation(Path(directory), "../token")
 
     def test_disconnect_invalidates_pending_authorization(self):
         with tempfile.TemporaryDirectory() as directory:

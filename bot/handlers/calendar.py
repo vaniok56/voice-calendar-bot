@@ -3,7 +3,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from aiohttp import web
 from aiogram import F, Bot, Router
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -37,23 +37,29 @@ def _connect_markup(url: str) -> InlineKeyboardMarkup:
 
 
 def _settings_view(user_id: int, config) -> tuple[str, InlineKeyboardMarkup | None]:
+    heading = "⚙️ <b>Settings</b>\n\n<b>Google Calendar</b>\n"
+    timezone = f"Timezone: <code>{escape(config.calendar_timezone)}</code>"
     if not oauth_is_configured(config):
-        return f"Google Calendar is not configured.\nTimezone: {escape(config.calendar_timezone)}", None
+        return heading + f"Status: Not configured\n{timezone}", None
     try:
         token = load_token(config.data_dir, user_id, config.calendar_token_encryption_key)
         if (
             token_is_usable(token)
             and token["connection_generation"] == connection_generation(config.data_dir, user_id)
         ):
-            status = f"Connected: {escape(token['account_email'])}"
+            status = "Connected"
+            account = f"\nAccount: {escape(token['account_email'])}"
         elif token is not None:
             status = "Reconnect required"
+            account = ""
         else:
             status = "Not connected"
+            account = ""
     except (CalendarAuthError, KeyError, TypeError):
         status = "Reconnect required"
+        account = ""
     return (
-        f"Google Calendar: {status}\nTimezone: {escape(config.calendar_timezone)}",
+        heading + f"Status: {status}{account}\n{timezone}",
         _settings_markup(status),
     )
 
@@ -66,9 +72,12 @@ async def connect_calendar_button(callback: CallbackQuery, config, settings_mess
         await callback.answer("Google Calendar connection is not configured.", show_alert=True)
         return
     await callback.answer()
-    text = "Connect Google Calendar with the button below. It expires in 10 minutes."
+    text = (
+        "⚙️ <b>Settings</b>\n\n<b>Google Calendar</b>\n"
+        "Use button below to authorize Google. Link expires in 10 minutes."
+    )
     markup = _connect_markup(url)
-    if callback.message.text and callback.message.text.startswith("Google Calendar:"):
+    if callback.message.text and callback.message.text.startswith(("⚙️ Settings", "Google Calendar:")):
         await callback.message.edit_text(text, reply_markup=markup)
         settings_messages[callback.from_user.id] = (
             callback.message.chat.id, callback.message.message_id
@@ -93,7 +102,7 @@ async def cancel_connect(callback: CallbackQuery, config, settings_messages: dic
 
 
 def _settings_markup(status: str) -> InlineKeyboardMarkup:
-    label = "Switch account" if status.startswith("Connected:") else (
+    label = "Switch account" if status == "Connected" else (
         "Reconnect" if status == "Reconnect required" else "Connect"
     )
     rows = [[InlineKeyboardButton(text=label, callback_data="connect_calendar")]]
@@ -117,19 +126,14 @@ async def disconnect_calendar_button(callback: CallbackQuery, config, settings_m
 async def settings(message: Message, bot: Bot, config, settings_messages: dict) -> None:
     user_id = message.from_user.id if message.from_user else 0
     text, markup = _settings_view(user_id, config)
-    if user_id in settings_messages:
-        chat_id, message_id = settings_messages[user_id]
-        try:
-            await bot.edit_message_text(
-                text, chat_id=chat_id, message_id=message_id, reply_markup=markup
-            )
-            return
-        except TelegramBadRequest as error:
-            if "message is not modified" in str(error):
-                return
-            settings_messages.pop(user_id, None)
+    previous = settings_messages.get(user_id)
     sent = await message.answer(text, reply_markup=markup)
     settings_messages[user_id] = (sent.chat.id, sent.message_id)
+    if previous and previous != settings_messages[user_id]:
+        try:
+            await bot.delete_message(chat_id=previous[0], message_id=previous[1])
+        except TelegramAPIError:
+            pass  # Telegram cannot delete bot messages older than 48 hours.
 
 
 async def google_callback(request: web.Request) -> web.Response:
@@ -171,6 +175,14 @@ async def google_callback(request: web.Request) -> web.Response:
             )
         except TelegramAPIError:
             messages.pop(pending["telegram_user_id"], None)
+    if bot is not None:
+        try:
+            await bot.send_message(
+                pending["telegram_user_id"],
+                f"Google Calendar connected: {escape(account_email)}",
+            )
+        except TelegramAPIError:
+            pass
     return web.Response(text="Google Calendar connected. Return to Telegram.")
 
 

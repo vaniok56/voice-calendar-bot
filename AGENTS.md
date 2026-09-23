@@ -61,7 +61,7 @@ Drafts and edit state are process-local. Restarting bot clears them. Durable rec
 
 ## User Interfaces
 
-Allowed users can use `/start`, `/help`, `/settings`, plain text, and Telegram voice. `/settings` reuses one editable bot message per user in current process, showing Calendar connection/email, global timezone, and inline Connect/Reconnect/Switch account/Disconnect controls; profile controls arrive in Branch 2. Connect edits card to show OAuth URL and Back; Back invalidates pending state and restores card. Successful OAuth callback updates card when process-local message reference still exists. Callback from an event card creates a separate settings card rather than replacing event. Old connect/disconnect commands are not registered; slash commands do not enter extraction handler.
+Allowed users can use `/start`, `/help`, `/settings`, plain text, and Telegram voice. `/settings` posts a fresh settings card at bottom of chat, best-effort deletes the previous process-local card, and shows Calendar connection/email, global timezone, and inline Connect/Reconnect/Switch account/Disconnect controls; profile controls arrive in Branch 2. Connect edits current card to show OAuth URL and Back; Back invalidates pending state and restores card. Successful OAuth callback updates current card and sends a private Telegram confirmation. Callback from an event card creates a separate settings card rather than replacing event. Old connect/disconnect commands are not registered; slash commands do not enter extraction handler.
 
 Admins also use `/admin_help`, `/list_users`, `/adduser <user_id>`. Owner alone can use `/add_admin <user_id>` and `/rm_admin <user_id>`.
 

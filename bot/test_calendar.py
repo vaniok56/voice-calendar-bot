@@ -139,7 +139,7 @@ class TestCalendarOAuthStorage(unittest.TestCase):
         callback = MagicMock()
         callback.from_user.id = 123
         callback.answer = AsyncMock()
-        callback.message.text = "Google Calendar: Not connected"
+        callback.message.text = "⚙️ Settings\n\nGoogle Calendar\nStatus: Not connected"
         callback.message.chat.id = 123
         callback.message.message_id = 456
         callback.message.edit_text = AsyncMock()
@@ -352,14 +352,18 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             request = SimpleNamespace(
                 app={
                     "config": config, "storage": SimpleNamespace(is_allowed=lambda user_id: True),
-                    "bot": SimpleNamespace(edit_message_text=AsyncMock()),
+                    "bot": SimpleNamespace(edit_message_text=AsyncMock(), send_message=AsyncMock()),
                     "settings_messages": {123: (123, 456)},
                 },
                 query={"state": state, "code": "code"},
             )
             self.assertEqual(asyncio.run(google_callback(request)).status, 200)
             request.app["bot"].edit_message_text.assert_awaited_once()
-            self.assertIn("Connected: user@example.com", request.app["bot"].edit_message_text.await_args.args[0])
+            self.assertIn("Status: Connected", request.app["bot"].edit_message_text.await_args.args[0])
+            self.assertIn("Account: user@example.com", request.app["bot"].edit_message_text.await_args.args[0])
+            request.app["bot"].send_message.assert_awaited_once_with(
+                123, "Google Calendar connected: user@example.com"
+            )
             token = load_token(config.data_dir, 123, TOKEN_KEY)
             self.assertTrue(token_is_usable(token))
             path = config.data_dir / "google-calendar" / "tokens" / "123.json"
@@ -421,42 +425,49 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             message = MagicMock()
             message.from_user.id = 123
             message.answer = AsyncMock()
-            bot = SimpleNamespace(edit_message_text=AsyncMock())
+            message.answer.side_effect = [
+                SimpleNamespace(chat=SimpleNamespace(id=123), message_id=number)
+                for number in (456, 457, 458)
+            ]
+            bot = SimpleNamespace(delete_message=AsyncMock())
             messages = {}
             asyncio.run(settings(message, bot, config, messages))
             self.assertIn("Not connected", message.answer.await_args.args[0])
             self.assertEqual(message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text, "Connect")
             save_token(config.data_dir, 123, {"access_token": "legacy"}, TOKEN_KEY)
             asyncio.run(settings(message, bot, config, messages))
-            self.assertIn("Reconnect required", bot.edit_message_text.await_args.args[0])
-            self.assertEqual(bot.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text, "Reconnect")
+            self.assertIn("Reconnect required", message.answer.await_args.args[0])
+            self.assertEqual(message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].text, "Reconnect")
             save_token(config.data_dir, 123, {
                 "schema_version": 2, "account_email": "user@example.com", "refresh_token": "refresh",
                 "connection_generation": 0, "access_token": "access",
                 "scope": ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/calendar.events.owned"],
             }, TOKEN_KEY)
             asyncio.run(settings(message, bot, config, messages))
-            self.assertIn("Connected: user@example.com", bot.edit_message_text.await_args.args[0])
-            self.assertIn("Europe/Chisinau", bot.edit_message_text.await_args.args[0])
-            buttons = bot.edit_message_text.await_args.kwargs["reply_markup"].inline_keyboard
+            self.assertIn("Status: Connected", message.answer.await_args.args[0])
+            self.assertIn("Account: user@example.com", message.answer.await_args.args[0])
+            self.assertIn("Europe/Chisinau", message.answer.await_args.args[0])
+            buttons = message.answer.await_args.kwargs["reply_markup"].inline_keyboard
             self.assertEqual(buttons[0][0].text, "Switch account")
             self.assertIn("disconnect_calendar", [button.callback_data for row in buttons for button in row])
-            message.answer.assert_awaited_once()
-            self.assertEqual(bot.edit_message_text.await_count, 2)
+            self.assertEqual(message.answer.await_count, 3)
+            self.assertEqual(bot.delete_message.await_count, 2)
+            self.assertEqual(messages[123], (123, 458))
 
-    def test_settings_replaces_deleted_card(self):
+    def test_settings_still_appears_if_old_card_cannot_be_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
             message = MagicMock()
             message.from_user.id = 123
             message.answer = AsyncMock()
-            bot = SimpleNamespace(edit_message_text=AsyncMock())
-            bot.edit_message_text.side_effect = TelegramBadRequest(
+            message.answer.return_value = SimpleNamespace(chat=SimpleNamespace(id=123), message_id=457)
+            bot = SimpleNamespace(delete_message=AsyncMock())
+            bot.delete_message.side_effect = TelegramBadRequest(
                 method=MagicMock(), message="message to edit not found"
             )
             messages = {123: (123, 456)}
             asyncio.run(settings(message, bot, self.config(directory), messages))
             message.answer.assert_awaited_once()
-            self.assertIn(123, messages)
+            self.assertEqual(messages[123], (123, 457))
 
     @patch("bot.calendar.aiohttp.ClientSession")
     def test_disconnect_button_removes_token(self, client_session):

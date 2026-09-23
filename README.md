@@ -12,10 +12,11 @@ seven days later. Locations, recurrence, corrections, multiple reminders, past
 starts, unknown operations, ungrounded fields, and DST ambiguity require review.
 
 Each user connects their own Google Calendar through `/settings` and its
-inline authorization button. `/settings` reuses one editable bot message: Connect
-shows the OAuth link on that card, Back invalidates the link and restores settings,
-and a successful Google callback updates the card. `/settings` shows the connected
-email, Calendar status, and configured timezone. Existing
+inline authorization button. Each `/settings` moves the card to the bottom of chat
+and removes the previous card when Telegram permits. Connect shows the OAuth link
+on the card; Back invalidates the link and restores settings. A successful Google
+callback updates the card and sends a private confirmation. `/settings` shows the
+connected email, Calendar status, and configured timezone. Existing
 connections must reconnect to grant email identity access; old tokens cannot
 write events. Disconnect tries to revoke the Google refresh token and always
 removes the local credential. With

@@ -134,8 +134,14 @@ def _source_record(record_path: Path, config) -> str:
         raise CalendarPayloadError("Calendar source record is outside data storage") from error
 
 
-def _calendar_markup(write_id: str, all_day: bool) -> InlineKeyboardMarkup:
+def _calendar_markup(
+    write_id: str, all_day: bool, *, retry: bool = False
+) -> InlineKeyboardMarkup:
     del all_day
+    if retry:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Retry", callback_data=f"confirm:{write_id}"),
+        ]])
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="✅ Confirm", callback_data=f"confirm:{write_id}"),
@@ -180,7 +186,11 @@ async def _execute_calendar_write(config, write: dict) -> dict:
             token = load_token(config.data_dir, write["telegram_user_id"])
             if token is None:
                 raise CalendarAuthError("Google Calendar is not connected")
-            if connection_generation(config.data_dir, write["telegram_user_id"]) != write.get("connection_generation", 0):
+            generation = write.get("connection_generation", 0)
+            if (
+                connection_generation(config.data_dir, write["telegram_user_id"]) != generation
+                or token.get("connection_generation") != generation
+            ):
                 raise CalendarAuthError("Google Calendar connection changed")
             if _token_is_expired(token):
                 refreshed = await refresh_access_token(config, token)
@@ -192,7 +202,7 @@ async def _execute_calendar_write(config, write: dict) -> dict:
                     != write.get("connection_generation", 0)
                 ):
                     raise CalendarAuthError("Google Calendar connection was removed")
-                token = refreshed
+                token = {**token, **refreshed}
                 save_token(config.data_dir, write["telegram_user_id"], token)
             event = await insert_event(token, write["payload"])
         except (CalendarAuthError, CalendarAPIError, CalendarPayloadError) as error:
@@ -368,7 +378,9 @@ async def reply_event(
                 await _deliver(
                     message, bot, draft,
                     _calendar_text(write["payload"], status, write.get("google_html_link")),
-                    None if write["status"] == "created" else _calendar_markup(write["write_id"], resolved.get("all_day", False)),
+                    None if write["status"] == "created" else _calendar_markup(
+                        write["write_id"], resolved.get("all_day", False), retry=True
+                    ),
                 )
                 drafts.pop(user_id, None)
                 return
@@ -381,12 +393,7 @@ async def reply_event(
             )
             drafts.pop(user_id, None)
             return
-        markup = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Confirm", callback_data=f"confirm:{message.message_id}"),
-            InlineKeyboardButton(text="✏️ Edit", callback_data=f"edit:{message.message_id}"),
-            InlineKeyboardButton(text="❌ Cancel", callback_data=f"cancel:{message.message_id}"),
-        ]])
-        await _deliver(message, bot, draft, text, markup)
+        await _deliver(message, bot, draft, text, None)
         drafts.pop(user_id, None)
         return
 
@@ -538,7 +545,9 @@ async def confirm_calendar_write(callback: CallbackQuery, config) -> None:
         text,
         reply_markup=(
             None if write["status"] == "created"
-            else _calendar_markup(write["write_id"], "date" in write["payload"]["start"])
+            else _calendar_markup(
+                write["write_id"], "date" in write["payload"]["start"], retry=True
+            )
         ),
     )
 

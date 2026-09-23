@@ -25,6 +25,7 @@ from .extraction import (
 )
 from .handlers.voice import (
     _answer_draft,
+    _calendar_markup,
     _question_keyboard,
     _question_text,
     format_resolved,
@@ -304,14 +305,21 @@ class TestReplyFlow(unittest.TestCase):
             self.assertEqual(record["effective_extraction"]["date"]["kind"], "absolute")
             self.assertEqual(record["clarification_answers"], ["2026-09-20"])
 
-    def test_final_card_keeps_placeholder_buttons(self):
+    def test_final_card_has_no_calendar_controls_without_oauth(self):
         raw = complete_raw()
         resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
         message = self.message()
-        asyncio.run(reply_event(message, MagicMock(), {}, 1, raw, resolved, None))
-        markup = message.answer.await_args.kwargs["reply_markup"]
-        callbacks = [button.callback_data for button in markup.inline_keyboard[0]]
-        self.assertEqual(callbacks, ["confirm:42", "edit:42", "cancel:42"])
+        config = SimpleNamespace(
+            data_dir=Path("."),
+            google_oauth_client_id="",
+            google_oauth_client_secret="",
+            google_oauth_redirect_uri="",
+        )
+        asyncio.run(reply_event(
+            message, MagicMock(), {}, 1, raw, resolved, None,
+            record_path=Path("record.json"), config=config,
+        ))
+        self.assertIsNone(message.answer.await_args.kwargs["reply_markup"])
 
     def test_calendar_edit_selection_has_back_button(self):
         from .handlers.voice import _edit_fields_markup
@@ -322,6 +330,11 @@ class TestReplyFlow(unittest.TestCase):
             for button in row
         ]
         self.assertIn("edit_back:abc123", callbacks)
+
+    def test_failed_calendar_write_has_retry_only(self):
+        markup = _calendar_markup("abc123", False, retry=True)
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+        self.assertEqual(callbacks, ["confirm:abc123"])
 
     def calendar_config(self, data_dir, enabled):
         return SimpleNamespace(
@@ -365,12 +378,32 @@ class TestReplyFlow(unittest.TestCase):
             save_token(config.data_dir, 1, {
                 "access_token": "access", "refresh_token": "refresh",
                 "expires_at": "2099-01-01T00:00:00+00:00",
+                "connection_generation": 0,
             })
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,
                 record_path=self.calendar_record_path(directory), config=config,
             ))
         mock_insert.assert_awaited_once()
+
+    @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
+    def test_auto_write_rejects_stale_token_generation(self, mock_insert):
+        raw = complete_raw()
+        resolved = semantic.resolve(raw, "sync tomorrow 09:00", REFERENCE)
+        with tempfile.TemporaryDirectory() as directory:
+            config = self.calendar_config(directory, True)
+            save_token(config.data_dir, 1, {
+                "access_token": "access", "refresh_token": "refresh",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "connection_generation": 1,
+            })
+            message = self.message()
+            asyncio.run(reply_event(
+                message, MagicMock(), {}, 1, raw, resolved, None,
+                record_path=self.calendar_record_path(directory), config=config,
+            ))
+        mock_insert.assert_not_awaited()
+        self.assertIn("creation failed", message.answer.await_args.args[0])
 
     @patch("bot.handlers.voice.insert_event", new_callable=AsyncMock)
     def test_confirm_retry_does_not_duplicate_event(self, mock_insert):
@@ -383,6 +416,7 @@ class TestReplyFlow(unittest.TestCase):
             save_token(config.data_dir, 1, {
                 "access_token": "access", "refresh_token": "refresh",
                 "expires_at": "2099-01-01T00:00:00+00:00",
+                "connection_generation": 0,
             })
             asyncio.run(reply_event(
                 self.message(), MagicMock(), {}, 1, raw, resolved, None,

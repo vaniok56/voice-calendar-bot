@@ -454,6 +454,8 @@ def resolve(
         raw = raw.copy()
 
     date_spec = _object(raw, "date", errors, _none_date())
+    if isinstance(date_spec.get("weekday"), list):
+        date_spec = _none_date()
     if date_spec.get("kind") != "none" and not _grounded(date_spec.get("source"), transcript):
         risks.append("ungrounded_date")
     if not _valid_date_spec(date_spec):

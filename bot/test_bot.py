@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,7 +25,9 @@ from .extraction import (
 )
 from .handlers.voice import (
     _answer_draft,
+    _calendar_link_markup,
     _calendar_markup,
+    _calendar_text,
     _question_keyboard,
     _question_text,
     format_resolved,
@@ -278,11 +280,90 @@ class TestPresentation(unittest.TestCase):
 
     def test_card_displays_readiness_and_risks(self):
         resolved = semantic.resolve(complete_raw(), "sync tomorrow 09:00", REFERENCE)
-        text = format_resolved(resolved)
+        text = format_resolved(resolved, REFERENCE)
+        self.assertIn("When:</b> Tomorrow · 09:00", text)
         self.assertIn("Safe to create without review when automatic writes are enabled", text)
         risky = {**resolved, "auto_write": False, "risks": ["weekday"]}
-        self.assertIn("Needs confirmation", format_resolved(risky))
-        self.assertIn("weekday", format_resolved(risky))
+        self.assertIn("Needs confirmation", format_resolved(risky, REFERENCE))
+        self.assertIn("weekday", format_resolved(risky, REFERENCE))
+
+    def test_calendar_card_is_human_readable(self):
+        payload = {
+            "summary": "придет Рома",
+            "start": {"dateTime": "2026-09-25T18:00:00+03:00", "timeZone": "Europe/Chisinau"},
+            "end": {"dateTime": "2026-09-25T19:00:00+03:00", "timeZone": "Europe/Chisinau"},
+            "recurrence": ["RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=FR"],
+            "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 30}]},
+        }
+        text = _calendar_text(
+            payload,
+            "✅ Created",
+            confirmation=True,
+            now=datetime.fromisoformat("2026-09-25T12:00:00+03:00"),
+        )
+        self.assertIn("Done — added to your calendar.", text)
+        self.assertIn("<b>When:</b> Today · 18:00 – 19:00 (1h)", text)
+        self.assertIn("↻ Repeats weekly on Friday", text)
+        self.assertIn("🔔 30 min before", text)
+        self.assertNotIn("RRULE", text)
+        self.assertNotIn("Open in Google Calendar", text)
+
+    def test_calendar_card_all_day_and_relative(self):
+        payload = {
+            "summary": "Birthday",
+            "start": {"date": "2026-09-26"},
+            "end": {"date": "2026-09-27"},
+        }
+        text = _calendar_text(payload, "✅ Created", now=datetime(2026, 9, 25, 12, 0))
+        self.assertIn("<b>When:</b> Tomorrow · All day", text)
+        self.assertNotIn("Done", text)
+
+    def test_calendar_link_is_button_not_preview(self):
+        markup = _calendar_link_markup("https://calendar.google.com/event?eid=abc")
+        self.assertEqual(
+            markup.inline_keyboard[0][0].url, "https://calendar.google.com/event?eid=abc"
+        )
+        self.assertIsNone(_calendar_link_markup(None))
+
+    def test_multiple_recurrence_weekdays_shown_and_date_valid(self):
+        raw = semantic_raw()
+        raw["date"].update(kind="weekday", source="every Tuesday and Friday", weekday=[1, 4])
+        raw["time"].update(kind="clock", source="18:00", hour=18, minute=0, meridiem="24h")
+        raw["recurrence"] = {
+            "source": "every Tuesday and Friday", "freq": "weekly", "interval": 1,
+            "weekdays": [1, 4], "month_day": None, "month": None,
+            "position": None, "count": None, "until": None,
+        }
+        resolved = semantic.resolve(
+            raw, "every Tuesday and Friday driving school 18:00", REFERENCE
+        )
+        self.assertNotIn("invalid_date", resolved["errors"])
+        self.assertEqual(resolved["recurrence"]["weekdays"], [1, 4])
+        self.assertIn("Repeats:</b> weekly on Tue, Fri", format_resolved(resolved, REFERENCE))
+
+    def test_resolved_when_shows_today_and_tomorrow(self):
+        now = datetime(2026, 9, 25, 12, 0, tzinfo=semantic.ZONE)
+        base = {
+            "event_type": "meeting",
+            "recurrence": None,
+            "reminders_minutes": [],
+            "auto_write": False,
+        }
+
+        def card_on(day):
+            start = datetime.combine(day, time(16, 0), tzinfo=semantic.ZONE)
+            return format_resolved({**base, "start": start.isoformat()}, now)
+
+        self.assertIn("<b>When:</b> Today · 16:00", card_on(now.date()))
+        self.assertIn(
+            "<b>When:</b> Tomorrow · 16:00", card_on(now.date() + timedelta(days=1))
+        )
+        later = now.date() + timedelta(days=5)
+        self.assertIn(
+            f"<b>When:</b> {later.strftime('%a, %d %b %Y')} · 16:00", card_on(later)
+        )
+        all_day = {**base, "all_day": True, "date": now.date().isoformat()}
+        self.assertIn("<b>When:</b> Today · All day", format_resolved(all_day, now))
 
     def test_questions_publish_strict_formats(self):
         self.assertIn("YYYY-MM-DD", _question_text("date", {"title": "Sync"}))

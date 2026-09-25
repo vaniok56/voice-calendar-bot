@@ -1,7 +1,8 @@
+import calendar
 import json
 import logging
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -55,38 +56,37 @@ CREDITS_PER_AUDIO_SECOND = 10 / 9
 WEEKDAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
-def _human_minutes(minutes: int | None) -> str | None:
+def _human_minutes(minutes: int | None, *, compact: bool = False) -> str | None:
     if minutes is None:
         return None
     hours, mins = divmod(int(minutes), 60)
     if hours and mins:
-        return f"{hours} h {mins} min"
+        return f"{hours}h {mins}m" if compact else f"{hours} h {mins} min"
     if hours:
-        return f"{hours} h"
-    return f"{mins} min"
+        return f"{hours}h" if compact else f"{hours} h"
+    return f"{mins}m" if compact else f"{mins} min"
 
 
-def format_resolved(resolved: dict) -> str:
+def format_resolved(resolved: dict, now: datetime | None = None) -> str:
     lines = ["📅 <b>Resolved</b>"]
     if resolved.get("title"):
         lines.append(f"<b>Title:</b> {escape(resolved['title'])}")
     lines.append(f"<b>Type:</b> {escape(str(resolved.get('custom_type') or resolved.get('event_type') or 'other'))}")
     if resolved.get("all_day"):
         if resolved.get("date"):
-            when = datetime.fromisoformat(resolved["date"]).strftime("%a %d %b %Y")
-            lines.append(f"<b>When:</b> {when} (all day)")
+            day = datetime.fromisoformat(resolved["date"])
+            label = _day_label(day.date(), (now or datetime.now(day.tzinfo)).date())
+            lines.append(f"<b>When:</b> {label} · All day")
         else:
             lines.append("<b>When:</b> all day")
     elif resolved.get("start"):
         start = datetime.fromisoformat(resolved["start"])
-        timezone = start.tzname()
-        lines.append(
-            f"<b>Start:</b> {start.strftime('%a %d %b %Y, %H:%M')}"
-            + (f" {timezone}" if timezone else "")
-        )
+        label = _day_label(start.date(), (now or datetime.now(start.tzinfo)).date())
+        lines.append(f"<b>When:</b> {label} · {start.strftime('%H:%M')}")
     elif resolved.get("date"):
-        when = datetime.fromisoformat(resolved["date"]).strftime("%a %d %b %Y")
-        lines.append(f"<b>When:</b> {when}")
+        day = datetime.fromisoformat(resolved["date"])
+        label = _day_label(day.date(), (now or datetime.now(day.tzinfo)).date())
+        lines.append(f"<b>When:</b> {label}")
     duration = _human_minutes(resolved.get("duration_minutes"))
     if duration:
         lines.append(f"<b>Duration:</b> {duration}")
@@ -94,9 +94,10 @@ def format_resolved(resolved: dict) -> str:
         lines.append(f"<b>Location:</b> {escape(resolved['location'])}")
     recurrence = resolved.get("recurrence")
     if recurrence:
-        weekday = ""
-        if recurrence.get("weekday") is not None:
-            weekday = f" on {WEEKDAY_NAMES[recurrence['weekday']]}"
+        weekdays = recurrence.get("weekdays") or []
+        weekday = (
+            " on " + ", ".join(WEEKDAY_NAMES[day] for day in weekdays) if weekdays else ""
+        )
         lines.append(f"<b>Repeats:</b> {escape(str(recurrence.get('freq', '')))}{weekday}")
     reminders = resolved.get("reminders_minutes") or []
     if reminders:
@@ -167,18 +168,95 @@ def _edit_fields_markup(write_id: str, all_day: bool) -> InlineKeyboardMarkup:
     ])
 
 
-def _calendar_text(payload: dict, status: str, html_link: str | None = None) -> str:
-    lines = ["📅 <b>Calendar event</b>", f"<b>Title:</b> {escape(payload['summary'])}"]
+_BYDAY_ORDER = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+
+
+def _day_label(target: date, reference: date) -> str:
+    delta = (target - reference).days
+    if delta == 0:
+        return "Today"
+    if delta == 1:
+        return "Tomorrow"
+    return target.strftime("%a, %d %b %Y")
+
+
+def _when_text(payload: dict, now: datetime | None = None) -> str:
     start = payload["start"]
     if "date" in start:
-        lines.append(f"<b>When:</b> {escape(start['date'])} (all day)")
+        day = date.fromisoformat(start["date"])
+        reference = (now or datetime.now()).date()
+        return f"{_day_label(day, reference)} · All day"
+    start_moment = datetime.fromisoformat(start["dateTime"])
+    reference = (now or datetime.now(start_moment.tzinfo)).astimezone(start_moment.tzinfo)
+    day = _day_label(start_moment.date(), reference.date())
+    end = payload.get("end") or {}
+    if "dateTime" in end:
+        end_moment = datetime.fromisoformat(end["dateTime"])
+        if end_moment.date() == start_moment.date():
+            duration = _human_minutes(
+                (end_moment - start_moment).total_seconds() // 60, compact=True
+            )
+            span = (
+                f"{start_moment.strftime('%H:%M')} – {end_moment.strftime('%H:%M')} ({duration})"
+            )
+        else:
+            span = f"{start_moment.strftime('%H:%M')} – {end_moment.strftime('%a %H:%M')}"
     else:
-        lines.append(f"<b>Start:</b> {escape(start['dateTime'])}")
+        span = start_moment.strftime("%H:%M")
+    return f"{day} · {span}"
+
+
+def _recurrence_text(rule: str) -> str:
+    fields = {}
+    for chunk in rule.split(":", 1)[-1].split(";"):
+        key, _, value = chunk.partition("=")
+        fields[key.upper()] = value
+    freq = (fields.get("FREQ") or "").lower()
+    interval = int(fields.get("INTERVAL", "1"))
+    unit = {"daily": "day", "weekly": "week", "monthly": "month", "yearly": "year"}[freq]
+    text = f"Repeats {freq}" if interval == 1 else f"Repeats every {interval} {unit}s"
+    weekdays = [
+        calendar.day_name[_BYDAY_ORDER.index(code)]
+        for code in (fields.get("BYDAY") or "").split(",")
+        if code in _BYDAY_ORDER
+    ]
+    if weekdays:
+        text += " on " + ", ".join(weekdays)
+    return text
+
+
+def _schedule_lines(payload: dict) -> list[str]:
+    lines = [f"↻ {_recurrence_text(rule)}" for rule in payload.get("recurrence") or []]
+    minutes = [
+        override["minutes"]
+        for override in (payload.get("reminders") or {}).get("overrides") or []
+    ]
+    if minutes:
+        human = ", ".join(_human_minutes(value) for value in sorted(minutes, reverse=True))
+        lines.append(f"🔔 {human} before")
+    return lines
+
+
+def _calendar_link_markup(html_link: str | None) -> InlineKeyboardMarkup | None:
+    if not html_link:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📆 Open in Calendar", url=html_link),
+    ]])
+
+
+def _calendar_text(
+    payload: dict, status: str, *, confirmation: bool = False, now: datetime | None = None
+) -> str:
+    lines = ["📅 <b>Calendar event</b>"]
+    if confirmation:
+        lines.append("Done — added to your calendar.")
+    lines.append(f"<b>Title:</b> {escape(payload['summary'])}")
+    lines.append(f"<b>When:</b> {escape(_when_text(payload, now))}")
     if payload.get("location"):
         lines.append(f"<b>Location:</b> {escape(payload['location'])}")
+    lines.extend(_schedule_lines(payload))
     lines.append(status)
-    if html_link:
-        lines.append(f'<a href="{escape(html_link, quote=True)}">Open in Google Calendar</a>')
     return "\n".join(lines)
 
 
@@ -278,11 +356,11 @@ def _question_keyboard(field: str, reference) -> InlineKeyboardMarkup:
         today, tomorrow = reference, reference + timedelta(days=1)
         rows.append([
             InlineKeyboardButton(
-                text=f"Today · {today:%a %d %b}",
+                text=f"Today · {today:%a, %d %b}",
                 callback_data=f"ans:date:{today.isoformat()}",
             ),
             InlineKeyboardButton(
-                text=f"Tomorrow · {tomorrow:%a %d %b}",
+                text=f"Tomorrow · {tomorrow:%a, %d %b}",
                 callback_data=f"ans:date:{tomorrow.isoformat()}",
             ),
         ])
@@ -408,10 +486,13 @@ async def reply_event(
                     status = "Automatic writes off; confirm to create."
                 else:
                     status = "⚠️ Google Calendar creation failed. Confirm to retry."
+                created = write["status"] == "created"
                 await _deliver(
                     message, bot, draft,
-                    _calendar_text(write["payload"], status, write.get("google_html_link")),
-                    None if write["status"] == "created" else _calendar_markup(
+                    _calendar_text(write["payload"], status, confirmation=created),
+                    _calendar_link_markup(write.get("google_html_link"))
+                    if created
+                    else _calendar_markup(
                         write["write_id"], resolved.get("all_day", False),
                         retry=write["status"] == "failed"
                     ),
@@ -575,13 +656,14 @@ async def confirm_calendar_write(callback: CallbackQuery, config) -> None:
     await callback.answer()
     write = await _execute_calendar_write(config, write)
     if write["status"] == "created":
-        text = _calendar_text(write["payload"], "✅ Created", write.get("google_html_link"))
+        text = _calendar_text(write["payload"], "✅ Created", confirmation=True)
     else:
         text = _calendar_text(write["payload"], "⚠️ Google Calendar creation failed. Confirm to retry.")
     await callback.message.edit_text(
         text,
         reply_markup=(
-            None if write["status"] == "created"
+            _calendar_link_markup(write.get("google_html_link"))
+            if write["status"] == "created"
             else _calendar_markup(
                 write["write_id"], "date" in write["payload"]["start"], retry=True
             )

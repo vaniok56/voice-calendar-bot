@@ -38,6 +38,7 @@ from .calendar import (
 )
 from .handlers.calendar import (
     _settings_view,
+    _telegram_return_page,
     answer_settings,
     cancel_connect,
     cancel_disconnect_calendar_button,
@@ -438,12 +439,21 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             request = SimpleNamespace(
                 app={
                     "config": config, "storage": SimpleNamespace(is_allowed=lambda user_id: True),
-                    "bot": SimpleNamespace(edit_message_text=AsyncMock(), send_message=AsyncMock()),
+                    "bot": SimpleNamespace(
+                        edit_message_text=AsyncMock(),
+                        send_message=AsyncMock(),
+                        get_me=AsyncMock(
+                            return_value=SimpleNamespace(username="voice_calendarr_bot")
+                        ),
+                    ),
                     "settings_messages": {123: (123, 456)},
                 },
                 query={"state": state, "code": "code"},
             )
-            self.assertEqual(asyncio.run(google_callback(request)).status, 200)
+            response = asyncio.run(google_callback(request))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.content_type, "text/html")
+            self.assertIn("https://t.me/voice_calendarr_bot", response.text)
             request.app["bot"].edit_message_text.assert_awaited_once()
             self.assertIn("Status: Connected", request.app["bot"].edit_message_text.await_args.args[0])
             self.assertIn("Account: user@example.com", request.app["bot"].edit_message_text.await_args.args[0])
@@ -456,6 +466,15 @@ class TestCalendarOAuthStorage(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["version"], 2)
             self.assertEqual(token["account_email"], "user@example.com")
             self.assertEqual(token["connection_generation"], connection_generation(config.data_dir, 123))
+
+    def test_telegram_return_page_redirects_or_falls_back(self):
+        page = _telegram_return_page("voice_calendarr_bot")
+        self.assertEqual(page.content_type, "text/html")
+        self.assertIn("tg://resolve?domain=voice_calendarr_bot", page.text)
+        self.assertIn("https://t.me/voice_calendarr_bot", page.text)
+        self.assertIn('width=device-width', page.text)
+        fallback = _telegram_return_page(None)
+        self.assertEqual(fallback.text, "Google Calendar connected. Return to Telegram.")
 
     @patch("bot.handlers.calendar.fetch_account_email", new_callable=AsyncMock)
     @patch("bot.handlers.calendar.exchange_code", new_callable=AsyncMock)

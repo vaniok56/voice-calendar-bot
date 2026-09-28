@@ -1,7 +1,8 @@
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from ..calendar import oauth_is_configured
 from ..storage import Storage
 
 
@@ -9,16 +10,12 @@ router = Router(name="start")
 
 START_TEXT = (
     "🎙️ <b>Voice Calendar Bot</b>\n\n"
-    "Send a voice message or plain text to build a calendar event.\n\n"
-    "Voice is transcribed with <b>ElevenLabs Scribe v2</b>, then a model extracts "
-    "the event fields and deterministic code resolves the date, time, duration, and reminders.\n\n"
-    "Supported languages: Romanian, Russian, English, and code-switched speech.\n\n"
-    "Voice format: OGG/Opus\n"
-    "Maximum voice size: 2 MiB\n"
-    "Retention: up to 7 days\n\n"
-    "/start - show this message\n"
-    "/help - show this message\n"
-    "/settings - manage Calendar account, automatic writes, timezone and event types"
+    "Send a voice note or text and I'll add it to your Google Calendar. "
+    "I work out the date, time, duration and reminders, and ask if anything is missing.\n\n"
+    "Understands Romanian, Russian, English, and mixed speech.\n"
+    "Voice: OGG/Opus, up to 2 MiB. Records kept up to 7 days.\n\n"
+    "/start · /help - this message\n"
+    "/settings - Google Calendar, automatic writes, timezone, event types"
 )
 
 
@@ -28,8 +25,16 @@ def start_text_for(user_id: int, storage: Storage) -> str:
     return START_TEXT
 
 
+def start_markup(config) -> InlineKeyboardMarkup | None:
+    if not oauth_is_configured(config):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Connect Google Calendar", callback_data="connect_calendar"),
+    ]])
+
+
 @router.message(CommandStart())
 @router.message(Command("help"))
-async def start(message: Message, storage: Storage) -> None:
+async def start(message: Message, storage: Storage, config) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    await message.answer(start_text_for(user_id, storage))
+    await message.answer(start_text_for(user_id, storage), reply_markup=start_markup(config))

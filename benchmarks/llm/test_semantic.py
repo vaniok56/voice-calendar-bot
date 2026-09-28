@@ -67,6 +67,9 @@ class TestSemanticResolver(unittest.TestCase):
             "Мне нужно убрать туалет кота через час", semantic.SYSTEM_PROMPT
         )
 
+    def test_prompt_matches_inflected_custom_type(self):
+        self.assertIn("Покормить Марсика", semantic.SYSTEM_PROMPT)
+
     def test_weekday_and_bare_hour(self):
         raw = empty(
             date={

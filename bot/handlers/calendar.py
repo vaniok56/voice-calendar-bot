@@ -445,6 +445,41 @@ async def answer_settings(message: Message, bot: Bot, config, settings_edits: di
     await bot.edit_message_text(text, chat_id=state["chat_id"], message_id=state["message_id"], reply_markup=markup)
 
 
+def _telegram_return_page(username: str | None) -> web.Response:
+    if not username:
+        return web.Response(text="Google Calendar connected. Return to Telegram.")
+    domain = escape(username, quote=True)
+    app_link = f"tg://resolve?domain={domain}"
+    web_link = escape(f"https://t.me/{username}", quote=True)
+    body = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="1; url={app_link}">
+<title>Google Calendar connected</title>
+<style>
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#fff;color:#111;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}}
+main{{width:100%;max-width:22rem;text-align:center}}
+h1{{margin:0 0 .5rem;font-size:1.25rem;font-weight:600}}
+p{{margin:0 0 1.5rem;color:#666}}
+a.open{{display:block;padding:.85rem;border-radius:.6rem;background:#2481cc;color:#fff;font-weight:600;text-decoration:none}}
+a.alt{{display:inline-block;margin-top:1rem;color:#888;font-size:.8rem;text-decoration:none}}
+</style>
+</head>
+<body>
+<main>
+<h1>Google Calendar connected</h1>
+<p>Opening Telegram…</p>
+<a class="open" href="{app_link}">Open Telegram</a>
+<a class="alt" href="{web_link}">App not opening? Tap here</a>
+</main>
+</body>
+</html>"""
+    return web.Response(text=body, content_type="text/html")
+
+
 async def google_callback(request: web.Request) -> web.Response:
     config = request.app["config"]
     storage = request.app["storage"]
@@ -494,7 +529,13 @@ async def google_callback(request: web.Request) -> web.Response:
             )
         except TelegramAPIError:
             pass
-    return web.Response(text="Google Calendar connected. Return to Telegram.")
+    username = None
+    if bot is not None:
+        try:
+            username = (await bot.get_me()).username
+        except TelegramAPIError:
+            pass
+    return _telegram_return_page(username)
 
 
 def callback_app(

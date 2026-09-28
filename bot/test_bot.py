@@ -38,6 +38,7 @@ from .handlers.voice import (
     run_extraction,
 )
 from .handlers.admin import admin_help
+from .handlers.start import start as start_command
 from .profile import load_profile, save_profile
 
 
@@ -364,6 +365,28 @@ class TestPresentation(unittest.TestCase):
         )
         all_day = {**base, "all_day": True, "date": now.date().isoformat()}
         self.assertIn("<b>When:</b> Today · All day", format_resolved(all_day, now))
+
+    def test_start_offers_connect_button_only_when_oauth_configured(self):
+        storage = SimpleNamespace(is_admin=lambda user_id: False)
+
+        def config_for(enabled):
+            value = "x" if enabled else ""
+            return SimpleNamespace(
+                google_oauth_client_id=value,
+                google_oauth_client_secret=value,
+                google_oauth_redirect_uri=value,
+            )
+
+        message = MagicMock()
+        message.from_user.id = 1
+        message.answer = AsyncMock()
+        asyncio.run(start_command(message, storage, config_for(True)))
+        markup = message.answer.await_args.kwargs["reply_markup"]
+        self.assertEqual(markup.inline_keyboard[0][0].text, "Connect Google Calendar")
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, "connect_calendar")
+        message.answer.reset_mock()
+        asyncio.run(start_command(message, storage, config_for(False)))
+        self.assertIsNone(message.answer.await_args.kwargs["reply_markup"])
 
     def test_questions_publish_strict_formats(self):
         self.assertIn("YYYY-MM-DD", _question_text("date", {"title": "Sync"}))
